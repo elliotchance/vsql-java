@@ -1,0 +1,65 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  native:
+    uses: ./.github/workflows/native.yml
+
+  test:
+    name: ${{ matrix.platform }}, Java ${{ matrix.java }}
+    needs: native
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x86-64, linux-arm64, macos-x86-64, macos-arm64, windows-x86-64]
+        java: ["22", "25"]
+        include:
+          - { platform: linux-x86-64, runner: ubuntu-latest }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm }
+          - { platform: macos-x86-64, runner: macos-15-intel }
+          - { platform: macos-arm64, runner: macos-latest }
+          - { platform: windows-x86-64, runner: windows-latest }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-${{ matrix.platform }}
+          path: build/native
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - run: mvn -B verify
+      - name: Run the example
+        shell: bash
+        run: java --enable-native-access=ALL-UNNAMED -cp target/vsql-0.0.0-SNAPSHOT.jar example/Example.java
+
+  jar:
+    name: Jar with every libvsql
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          path: build/native
+          merge-multiple: true
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - run: mvn -B package -DskipTests
+      - name: Check the libraries
+        run: scripts/check-jar.sh target/vsql-0.0.0-SNAPSHOT.jar
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jar
+          path: target/*.jar

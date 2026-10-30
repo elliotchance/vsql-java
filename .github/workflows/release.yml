@@ -1,0 +1,50 @@
+name: Release
+
+# Publishes the jar (with libvsql for every OS and architecture) to Maven
+# Central when a GitHub release is published. The version is the release's tag
+# (v1.2.3 is 1.2.3).
+#
+# It needs these secrets: MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD (a
+# user token from https://central.sonatype.com), and GPG_PRIVATE_KEY and
+# GPG_PASSPHRASE (the key that signs the artifacts).
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  native:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/native.yml
+
+  publish:
+    name: Publish to Maven Central
+    needs: native
+    runs-on: ubuntu-latest
+    environment:
+      name: maven-central
+      url: https://central.sonatype.com/artifact/io.github.elliotchance/vsql
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          path: build/native
+          merge-multiple: true
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - name: Set the version
+        run: mvn -B versions:set -DnewVersion="${GITHUB_REF_NAME#v}" -DgenerateBackupPoms=false
+      - run: mvn -B -P release deploy
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}

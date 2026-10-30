@@ -1,0 +1,4 @@
+# The libvsql C from the vsql amalgamation (see scripts/update-amalgamation.sh),
+# and the generated JDBC stubs.
+internal/amalgamation/** linguist-generated=true
+src/main/java/io/github/elliotchance/vsql/Unsupported*.java linguist-generated=true
