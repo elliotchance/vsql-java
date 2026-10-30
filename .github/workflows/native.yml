@@ -1,0 +1,51 @@
+name: libvsql
+
+# Builds libvsql for each OS and architecture (see scripts/build-libvsql.sh),
+# as an artifact named native-OS-ARCH with build/native/OS-ARCH in it. It's
+# used by test.yml and release.yml.
+#
+# The libraries work on older systems than the runners: Linux is built in a
+# manylinux_2_28 container (glibc 2.28), and macOS for macOS 11. vsql has no
+# C for Windows ARM64.
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    name: libvsql for ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86-64, runner: ubuntu-latest }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm }
+          - { platform: macos-x86-64, runner: macos-15-intel }
+          - { platform: macos-arm64, runner: macos-latest }
+          - { platform: windows-x86-64, runner: windows-latest }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$PWD":/w -w /w "quay.io/pypa/manylinux_2_28_$(uname -m)" \
+            scripts/build-libvsql.sh
+          sudo chown -R "$(id -u)" build
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/build-libvsql.sh
+      - uses: msys2/setup-msys2@v2.33.0
+        if: runner.os == 'Windows'
+        with:
+          msystem: UCRT64
+          install: make mingw-w64-ucrt-x86_64-gcc
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: scripts/build-libvsql.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.platform }}
+          path: build/native
+          if-no-files-found: error
