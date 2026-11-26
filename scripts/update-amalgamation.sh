@@ -10,7 +10,11 @@
 #   scripts/update-amalgamation.sh vsql-v1.2.3-amalgamation.zip
 #
 # Only what's needed to build libvsql (the shared library) with its Makefile is
-# copied, see scripts/build-libvsql.sh.
+# copied, see scripts/build-libvsql.sh: libvsql.c (the C for every OS and
+# architecture in one file), libvsql.h, the Makefile with vsql.mk (the libraries
+# and linker options for each OS and architecture), the files that say which
+# routines the library exports (libvsql.def, .exports and .map), and the
+# licenses.
 
 set -euo pipefail
 
@@ -38,6 +42,11 @@ if [ -f "$source" ]; then
   source="$(dirname "$(find "$tmp/unzipped" -name libvsql.h | head -1)")"
 fi
 
+# A zip or folder from a release is named vsql-VERSION-amalgamation.
+if [ -z "${version:-}" ]; then
+  version="$(basename "$source" | sed -n 's/^vsql-\(v.*\)-amalgamation$/\1/p')"
+fi
+
 if [ ! -f "$source/libvsql.h" ] || [ ! -f "$source/libvsql.c" ]; then
   echo "$1 isn't a vsql amalgamation (there's no libvsql.h or libvsql.c)" >&2
   exit 1
@@ -45,13 +54,13 @@ fi
 
 rm -rf "$out"
 mkdir -p "$out"
-for file in "$source"/*; do
-  name="$(basename "$file")"
-  case "$name" in
-    # vsql, the command line program, and the example.
-    vsql.c | vsql_*_amd64.c | vsql_*_arm64.c | example.c) ;;
-    *) cp -R "$file" "$out/" ;;
-  esac
+for name in libvsql.c libvsql.h libvsql.def libvsql.exports libvsql.map \
+  Makefile vsql.mk LICENSE LICENSE-V; do
+  if [ ! -f "$source/$name" ]; then
+    echo "$source has no $name" >&2
+    exit 1
+  fi
+  cp "$source/$name" "$out/"
 done
 
 # The release, for DatabaseMetaData.getDatabaseProductVersion.

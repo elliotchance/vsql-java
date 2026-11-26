@@ -5,8 +5,8 @@ name: libvsql
 # used by test.yml and release.yml.
 #
 # The libraries work on older systems than the runners: Linux is built in a
-# manylinux_2_28 container (glibc 2.28), and macOS for macOS 11. vsql has no
-# C for Windows ARM64.
+# manylinux_2_28 container (glibc 2.28), and macOS for macOS 11. Windows ARM64
+# isn't built.
 
 on:
   workflow_call:

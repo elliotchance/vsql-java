@@ -134,19 +134,14 @@ class VsqlTest {
         }
     }
 
-    /**
-     * vsql drops the leading zeros of fractional seconds
-     * (https://github.com/elliotchance/vsql/issues/697). This test fails once
-     * it's fixed, so the assertThrows can be removed when the amalgamation is
-     * updated.
-     */
+    /** vsql used to drop the leading zeros of fractional seconds (vsql#697). */
     @Test
     void fractionalSecondsWithLeadingZeros() throws SQLException {
         try (Statement s = conn.createStatement();
                 ResultSet rs = s.executeQuery("VALUES TIMESTAMP '2022-01-02 15:04:05.000006'")) {
             rs.next();
             LocalDateTime got = rs.getObject(1, LocalDateTime.class);
-            assertThrows(AssertionError.class, () -> assertEquals(6_000, got.getNano(), "vsql#697"));
+            assertEquals(6_000, got.getNano());
         }
     }
 

@@ -128,22 +128,30 @@ final class Values {
         return String.format("%s%02d:%02d", seconds < 0 ? "-" : "+", minutes / 60, minutes % 60);
     }
 
-    // The datetimes from SQLGetData, such as "2022-01-02T15:04:05.123456+0530".
-    // There are at most 6 fractional digits.
+    // The datetimes from SQLGetData are literals, such as
+    // "TIMESTAMP '2022-01-02 15:04:05.123456+05:30'". There are at most 6
+    // fractional digits.
     private static final DateTimeFormatter TIME_COLUMN = new DateTimeFormatterBuilder()
             .appendPattern("HH:mm:ss")
             .optionalStart().appendFraction(ChronoField.NANO_OF_SECOND, 1, 6, true).optionalEnd()
-            .optionalStart().appendOffset("+HHMM", "+0000").optionalEnd()
+            .optionalStart().appendOffset("+HH:MM", "+00:00").optionalEnd()
             .toFormatter();
     private static final DateTimeFormatter TIMESTAMP_COLUMN = new DateTimeFormatterBuilder()
             .append(DateTimeFormatter.ISO_LOCAL_DATE)
-            .appendLiteral('T')
+            .appendLiteral(' ')
             .append(TIME_COLUMN)
             .toFormatter();
 
+    /** The string in a literal, such as "2022-01-02" for "DATE '2022-01-02'". */
+    static String unliteral(String s) {
+        int start = s.indexOf('\'');
+        int end = s.lastIndexOf('\'');
+        return start >= 0 && end > start ? s.substring(start + 1, end) : s;
+    }
+
     private static TemporalAccessor parse(DateTimeFormatter formatter, String s, String type) throws SQLException {
         try {
-            return formatter.parse(s);
+            return formatter.parse(unliteral(s));
         } catch (DateTimeParseException e) {
             throw new SQLException("vsql: invalid " + type + ": " + s, "22007", e);
         }
