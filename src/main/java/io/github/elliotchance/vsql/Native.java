@@ -51,6 +51,7 @@ final class Native {
     static final short SQL_NO_DATA = 100;
     static final short SQL_INVALID_HANDLE = -2;
     static final int SQL_NULL_DATA = -1;
+    static final int SQL_NTS = -3;
 
     static final short SQL_HANDLE_ENV = 1;
     static final short SQL_HANDLE_DBC = 2;
@@ -509,7 +510,9 @@ final class Native {
                             byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
                             value = arena.allocateFrom(JAVA_BYTE, bytes.length == 0 ? new byte[1] : bytes);
                             bufferLength = bytes.length;
-                            ind.set(JAVA_INT, 0, bytes.length);
+                            // A length must be greater than zero, an empty
+                            // string is given null terminated.
+                            ind.set(JAVA_INT, 0, bytes.length == 0 ? SQL_NTS : bytes.length);
                         }
                         default -> throw new IllegalArgumentException("vsql: parameter " + p.value());
                     }

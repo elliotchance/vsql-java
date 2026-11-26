@@ -146,10 +146,18 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         Object v = value(index);
         return switch (v) {
             case null -> null;
-            // A timestamp is read as "2022-01-02T15:04:05".
-            case String s when column(index).jdbcType() == java.sql.Types.TIMESTAMP
-                    || column(index).jdbcType() == java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> s.replace('T', ' ');
+            // A datetime is read as its literal, such as
+            // "TIMESTAMP '2022-01-02 15:04:05'".
+            case String s when isDatetime(column(index).jdbcType()) -> Values.unliteral(s);
             default -> v.toString();
+        };
+    }
+
+    private static boolean isDatetime(int jdbcType) {
+        return switch (jdbcType) {
+            case java.sql.Types.DATE, java.sql.Types.TIME, java.sql.Types.TIME_WITH_TIMEZONE,
+                    java.sql.Types.TIMESTAMP, java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> true;
+            default -> false;
         };
     }
 

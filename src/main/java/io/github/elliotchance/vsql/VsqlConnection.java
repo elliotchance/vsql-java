@@ -89,10 +89,12 @@ public final class VsqlConnection extends UnsupportedConnection {
         if (autoCommit || inTransaction) {
             return;
         }
-        int level = isolation == TRANSACTION_READ_UNCOMMITTED
-                ? Native.SQL_TRANSACTION_READ_UNCOMMITTED
-                : Native.SQL_TRANSACTION_READ_COMMITTED;
-        Native.startTran(dbc, Native.SQL_TRANSACTION_READ_WRITE, level);
+        // A READ UNCOMMITTED transaction must be READ ONLY.
+        if (isolation == TRANSACTION_READ_UNCOMMITTED) {
+            Native.startTran(dbc, Native.SQL_TRANSACTION_READ_ONLY, Native.SQL_TRANSACTION_READ_UNCOMMITTED);
+        } else {
+            Native.startTran(dbc, Native.SQL_TRANSACTION_READ_WRITE, Native.SQL_TRANSACTION_READ_COMMITTED);
+        }
         inTransaction = true;
     }
 
@@ -153,7 +155,8 @@ public final class VsqlConnection extends UnsupportedConnection {
 
     /**
      * vsql's transactions are READ COMMITTED, so only READ UNCOMMITTED (which
-     * is READ COMMITTED) and READ COMMITTED are supported.
+     * is READ COMMITTED) and READ COMMITTED are supported. A READ UNCOMMITTED
+     * transaction is READ ONLY, as the SQL standard requires.
      */
     @Override
     public synchronized void setTransactionIsolation(int level) throws SQLException {
