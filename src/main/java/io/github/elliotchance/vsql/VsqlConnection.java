@@ -1,5 +1,7 @@
 package io.github.elliotchance.vsql;
 
+import java.sql.Blob;
+import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -7,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
 import java.sql.SQLWarning;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,7 +30,16 @@ import java.util.concurrent.Executor;
  * <p>Auto-commit is on by default: each statement is committed when it
  * finishes (or when its result set is closed). With auto-commit off, the first
  * statement starts a transaction, which is ended by {@link #commit()} or
- * {@link #rollback()}. vsql's transactions are READ COMMITTED.
+ * {@link #rollback()}, and can have savepoints. Each transaction has the
+ * isolation level of {@link #setTransactionIsolation(int)} (READ COMMITTED by
+ * default), and is READ ONLY if {@link #setReadOnly(boolean)} is true. They
+ * don't apply to the statements that are executed with auto-commit on, which
+ * have vsql's defaults (SERIALIZABLE and READ WRITE).
+ *
+ * <p>vsql's own default is SERIALIZABLE, but a SERIALIZABLE transaction that
+ * changes a table makes the other connections that use the table wait for it
+ * to finish (for up to 5 seconds, then it's SQLSTATE 40001), so the driver's
+ * default is READ COMMITTED.
  */
 public final class VsqlConnection extends UnsupportedConnection {
     private final String url;
@@ -38,6 +50,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     private boolean inTransaction;
     private boolean readOnly;
     private int isolation = TRANSACTION_READ_COMMITTED;
+    private int savepoints;
     private final Set<VsqlStatement> statements = new LinkedHashSet<>();
 
     VsqlConnection(String url, String database) throws SQLException {
@@ -89,12 +102,12 @@ public final class VsqlConnection extends UnsupportedConnection {
         if (autoCommit || inTransaction) {
             return;
         }
-        // A READ UNCOMMITTED transaction must be READ ONLY.
-        if (isolation == TRANSACTION_READ_UNCOMMITTED) {
-            Native.startTran(dbc, Native.SQL_TRANSACTION_READ_ONLY, Native.SQL_TRANSACTION_READ_UNCOMMITTED);
-        } else {
-            Native.startTran(dbc, Native.SQL_TRANSACTION_READ_WRITE, Native.SQL_TRANSACTION_READ_COMMITTED);
-        }
+        // A READ UNCOMMITTED transaction must be READ ONLY. The JDBC isolation
+        // levels are the same as the SQL/CLI ones.
+        int access = readOnly || isolation == TRANSACTION_READ_UNCOMMITTED
+                ? Native.SQL_TRANSACTION_READ_ONLY
+                : Native.SQL_TRANSACTION_READ_WRITE;
+        Native.startTran(dbc, access, isolation);
         inTransaction = true;
     }
 
@@ -117,11 +130,92 @@ public final class VsqlConnection extends UnsupportedConnection {
         }
 
         // The result sets are closed by the end of the transaction.
+        closeResultSets();
+        inTransaction = false;
+        Native.endTran(dbc, commit);
+    }
+
+    private void closeResultSets() throws SQLException {
         for (VsqlStatement statement : new ArrayList<>(statements)) {
             statement.closeResultSet();
         }
-        inTransaction = false;
-        Native.endTran(dbc, commit);
+    }
+
+    /**
+     * Makes a savepoint in the transaction (which is started if there isn't
+     * one). Auto-commit must be off.
+     */
+    @Override
+    public synchronized Savepoint setSavepoint() throws SQLException {
+        return newSavepoint(null);
+    }
+
+    /** A named savepoint (any name can be given), see {@link #setSavepoint()}. */
+    @Override
+    public synchronized Savepoint setSavepoint(String name) throws SQLException {
+        if (name == null) {
+            throw new SQLException("vsql: the savepoint name can't be null", "HY009");
+        }
+        return newSavepoint(name);
+    }
+
+    private Savepoint newSavepoint(String name) throws SQLException {
+        check();
+        if (autoCommit) {
+            throw new SQLException("vsql: there are no savepoints with auto-commit on", "25000");
+        }
+        begin();
+        VsqlSavepoint savepoint = new VsqlSavepoint(this, ++savepoints, name);
+        int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, dbc);
+        try {
+            Native.execDirect(stmt, "SAVEPOINT " + savepoint.sqlName);
+        } finally {
+            Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
+        }
+        return savepoint;
+    }
+
+    private VsqlSavepoint savepoint(Savepoint savepoint) throws SQLException {
+        check();
+        if (autoCommit) {
+            throw new SQLException("vsql: there are no savepoints with auto-commit on", "25000");
+        }
+        if (!(savepoint instanceof VsqlSavepoint s) || s.connection != this) {
+            throw new SQLException("vsql: the savepoint isn't from this connection", "3B001");
+        }
+        return s;
+    }
+
+    /**
+     * Rolls back the changes after the savepoint, which also destroys the
+     * savepoints after it. It closes the result sets.
+     */
+    @Override
+    public synchronized void rollback(Savepoint savepoint) throws SQLException {
+        VsqlSavepoint s = savepoint(savepoint);
+        closeResultSets();
+        Native.endSavepoint(dbc, s.sqlName, Native.SQL_SAVEPOINT_NAME_ROLLBACK);
+    }
+
+    /** Destroys the savepoint (and the savepoints after it). */
+    @Override
+    public synchronized void releaseSavepoint(Savepoint savepoint) throws SQLException {
+        VsqlSavepoint s = savepoint(savepoint);
+        Native.endSavepoint(dbc, s.sqlName, Native.SQL_SAVEPOINT_NAME_RELEASE);
+    }
+
+    /** A BLOB in memory, which can be a parameter. */
+    @Override
+    public Blob createBlob() throws SQLException {
+        check();
+        return new VsqlBlob(new byte[0]);
+    }
+
+    /** A CLOB in memory, which can be a parameter. */
+    @Override
+    public Clob createClob() throws SQLException {
+        check();
+        return new VsqlClob("");
     }
 
     @Override
@@ -154,19 +248,27 @@ public final class VsqlConnection extends UnsupportedConnection {
     }
 
     /**
-     * vsql's transactions are READ COMMITTED, so only READ UNCOMMITTED (which
-     * is READ COMMITTED) and READ COMMITTED are supported. A READ UNCOMMITTED
-     * transaction is READ ONLY, as the SQL standard requires.
+     * The isolation level of the transactions that are started after it. vsql
+     * runs READ UNCOMMITTED as READ COMMITTED and REPEATABLE READ as
+     * SERIALIZABLE. A READ UNCOMMITTED transaction is READ ONLY, as the SQL
+     * standard requires. It can't be changed during a transaction.
      */
     @Override
     public synchronized void setTransactionIsolation(int level) throws SQLException {
         check();
         switch (level) {
-            case TRANSACTION_READ_UNCOMMITTED, TRANSACTION_READ_COMMITTED -> isolation = level;
-            case TRANSACTION_REPEATABLE_READ, TRANSACTION_SERIALIZABLE ->
-                    throw new java.sql.SQLFeatureNotSupportedException(
-                            "vsql: transactions are READ COMMITTED", "HYC00");
+            case TRANSACTION_READ_UNCOMMITTED, TRANSACTION_READ_COMMITTED, TRANSACTION_REPEATABLE_READ,
+                    TRANSACTION_SERIALIZABLE -> {
+                notInTransaction("isolation level");
+                isolation = level;
+            }
             default -> throw new SQLException("vsql: invalid isolation level " + level, "HY024");
+        }
+    }
+
+    private void notInTransaction(String what) throws SQLException {
+        if (inTransaction) {
+            throw new SQLException("vsql: the " + what + " can't be changed during a transaction", "25001");
         }
     }
 
@@ -176,10 +278,15 @@ public final class VsqlConnection extends UnsupportedConnection {
         return isolation;
     }
 
-    /** Read only is a hint, which vsql doesn't use. */
+    /**
+     * Makes the transactions that are started after it READ ONLY, so that
+     * changing data is an error (SQLSTATE 25006). It can't be changed during a
+     * transaction.
+     */
     @Override
     public synchronized void setReadOnly(boolean readOnly) throws SQLException {
         check();
+        notInTransaction("access mode");
         this.readOnly = readOnly;
     }
 

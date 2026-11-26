@@ -1,6 +1,12 @@
 package io.github.elliotchance.vsql;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.Reader;
+import java.io.StringWriter;
 import java.math.BigDecimal;
+import java.sql.Blob;
+import java.sql.Clob;
 import java.sql.Date;
 import java.sql.ParameterMetaData;
 import java.sql.ResultSet;
@@ -23,12 +29,16 @@ import java.util.List;
 public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     private Param[] params = new Param[0];
     private final List<Param[]> batch = new ArrayList<>();
+    // The dynamic parameters, which are read when the statement is prepared,
+    // since binding a parameter replaces its record in the IPD.
+    private final Column[] parameters;
 
     VsqlPreparedStatement(VsqlConnection connection, String sql) throws SQLException {
         super(connection);
         int handle = handle();
         try {
             Native.prepare(handle, sql);
+            parameters = Native.describeParams(handle);
         } catch (SQLException e) {
             close();
             throw e;
@@ -192,9 +202,16 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         }
     }
 
+    /**
+     * The type of each parameter, which vsql determines from where it's used
+     * (such as the type of x in "x = ?") when the statement is prepared.
+     */
     @Override
     public ParameterMetaData getParameterMetaData() throws SQLException {
-        throw Errors.unsupported("parameter metadata (libvsql doesn't describe parameters)");
+        synchronized (connection) {
+            check();
+            return new VsqlParameterMetaData(parameters);
+        }
     }
 
     @Override
@@ -255,6 +272,129 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     @Override
     public void setNString(int index, String x) throws SQLException {
         set(index, (Object) x);
+    }
+
+    /** A BINARY VARYING. */
+    @Override
+    public void setBytes(int index, byte[] x) throws SQLException {
+        set(index, (Object) x);
+    }
+
+    /** A BINARY LARGE OBJECT. */
+    @Override
+    public void setBlob(int index, Blob x) throws SQLException {
+        set(index, (Object) x);
+    }
+
+    /** A BINARY LARGE OBJECT, read from the stream now. */
+    @Override
+    public void setBlob(int index, InputStream x) throws SQLException {
+        setBlob(index, x, -1);
+    }
+
+    /** A BINARY LARGE OBJECT of length octets, read from the stream now. */
+    @Override
+    public void setBlob(int index, InputStream x, long length) throws SQLException {
+        set(index, x == null ? null : new VsqlBlob(read(x, length)));
+    }
+
+    /** A BINARY VARYING, read from the stream now. */
+    @Override
+    public void setBinaryStream(int index, InputStream x) throws SQLException {
+        setBinaryStream(index, x, -1L);
+    }
+
+    /** A BINARY VARYING of length octets, read from the stream now. */
+    @Override
+    public void setBinaryStream(int index, InputStream x, int length) throws SQLException {
+        setBinaryStream(index, x, (long) length);
+    }
+
+    /** A BINARY VARYING of length octets, read from the stream now. */
+    @Override
+    public void setBinaryStream(int index, InputStream x, long length) throws SQLException {
+        set(index, x == null ? null : (Object) read(x, length));
+    }
+
+    /** A CHARACTER LARGE OBJECT. */
+    @Override
+    public void setClob(int index, Clob x) throws SQLException {
+        set(index, (Object) x);
+    }
+
+    /** A CHARACTER LARGE OBJECT, read from the reader now. */
+    @Override
+    public void setClob(int index, Reader x) throws SQLException {
+        setClob(index, x, -1);
+    }
+
+    /** A CHARACTER LARGE OBJECT of length chars, read from the reader now. */
+    @Override
+    public void setClob(int index, Reader x, long length) throws SQLException {
+        set(index, x == null ? Values.param(null) : Values.clob(read(x, length)));
+    }
+
+    /** A CHARACTER LARGE OBJECT, read from the reader now. */
+    @Override
+    public void setCharacterStream(int index, Reader x) throws SQLException {
+        setClob(index, x, -1);
+    }
+
+    /** A CHARACTER LARGE OBJECT of length chars, read from the reader now. */
+    @Override
+    public void setCharacterStream(int index, Reader x, int length) throws SQLException {
+        setClob(index, x, length);
+    }
+
+    /** A CHARACTER LARGE OBJECT of length chars, read from the reader now. */
+    @Override
+    public void setCharacterStream(int index, Reader x, long length) throws SQLException {
+        setClob(index, x, length);
+    }
+
+    /** All of a stream (for a negative length), or length octets of it. */
+    private static byte[] read(InputStream in, long length) throws SQLException {
+        try {
+            if (length < 0) {
+                return in.readAllBytes();
+            }
+            if (length > Integer.MAX_VALUE) {
+                throw new SQLException("vsql: the stream is too long", "22001");
+            }
+            byte[] b = in.readNBytes((int) length);
+            if (b.length < length) {
+                throw new SQLException("vsql: the stream has fewer than " + length + " octets", "22023");
+            }
+            return b;
+        } catch (IOException e) {
+            throw new SQLException("vsql: can't read the stream: " + e.getMessage(), "HY000", e);
+        }
+    }
+
+    /** All of a reader (for a negative length), or length chars of it. */
+    private static String read(Reader in, long length) throws SQLException {
+        try {
+            if (length < 0) {
+                StringWriter w = new StringWriter();
+                in.transferTo(w);
+                return w.toString();
+            }
+            if (length > Integer.MAX_VALUE) {
+                throw new SQLException("vsql: the reader is too long", "22001");
+            }
+            char[] buf = new char[(int) length];
+            int n = 0;
+            while (n < buf.length) {
+                int r = in.read(buf, n, buf.length - n);
+                if (r < 0) {
+                    throw new SQLException("vsql: the reader has fewer than " + length + " chars", "22023");
+                }
+                n += r;
+            }
+            return new String(buf);
+        } catch (IOException e) {
+            throw new SQLException("vsql: can't read the reader: " + e.getMessage(), "HY000", e);
+        }
     }
 
     @Override

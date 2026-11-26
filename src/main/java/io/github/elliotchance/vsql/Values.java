@@ -3,12 +3,14 @@ package io.github.elliotchance.vsql;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
+import java.time.Period;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -60,10 +62,50 @@ final class Values {
             case OffsetDateTime t -> timestamp(t.toLocalDateTime(), t.getOffset());
             case ZonedDateTime t -> timestamp(t.toLocalDateTime(), t.getOffset());
             case Instant i -> timestamp(LocalDateTime.ofInstant(i, ZoneOffset.UTC), ZoneOffset.UTC);
-            case byte[] b -> throw Errors.unsupported("a byte[] parameter (vsql doesn't have a binary type)");
+            case byte[] b -> binary(Native.SQL_VARBINARY, b);
+            case java.sql.Blob b -> binary(Native.SQL_BLOB, bytes(b));
+            case java.sql.Clob c -> clob(string(c));
+            case Period p -> text(Native.SQL_INTERVAL_YEAR_TO_MONTH, YEAR_TO_MONTH_SIZE, 0, Interval.format(p));
+            case Duration d -> text(Native.SQL_INTERVAL_DAY_TO_SECOND, DAY_TO_SECOND_SIZE, 6, Interval.format(d));
             default -> throw new SQLException(
                     "vsql: a " + x.getClass().getName() + " can't be a parameter", "07006");
         };
+    }
+
+    // The ColumnSize of an interval parameter is the length of its string
+    // without a sign, with the largest leading field precision (8): "-1-2" is
+    // an INTERVAL YEAR(8) TO MONTH, and "-1 02:03:04.500000" is an INTERVAL
+    // DAY(8) TO SECOND(6). It's then cast to the type of the parameter.
+    private static final int YEAR_TO_MONTH_SIZE = 8 + 3;
+    private static final int DAY_TO_SECOND_SIZE = 8 + 16;
+
+    /**
+     * A binary string. Its length (which can be 0) is its length in octets,
+     * and the column size must be at least 1.
+     */
+    private static Param binary(short parameterType, byte[] b) {
+        return new Param(Native.SQL_BINARY, parameterType, Math.max(b.length, 1), (short) 0, b);
+    }
+
+    /** A CHARACTER LARGE OBJECT as long as the string. */
+    static Param clob(String s) {
+        return text(Native.SQL_CLOB, Math.max(s.codePointCount(0, s.length()), 1), 0, s);
+    }
+
+    static byte[] bytes(java.sql.Blob b) throws SQLException {
+        long n = b.length();
+        if (n > Integer.MAX_VALUE) {
+            throw new SQLException("vsql: the BLOB is too long", "22001");
+        }
+        return b.getBytes(1, (int) n);
+    }
+
+    static String string(java.sql.Clob c) throws SQLException {
+        long n = c.length();
+        if (n > Integer.MAX_VALUE) {
+            throw new SQLException("vsql: the CLOB is too long", "22001");
+        }
+        return c.getSubString(1, (int) n);
     }
 
     private static Param bigint(long l) {
