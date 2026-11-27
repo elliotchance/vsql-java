@@ -389,7 +389,11 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         };
     }
 
-    /** A local date and time (a value with a time zone is in the zone). */
+    /**
+     * A local date and time. A value with a time zone is converted to the
+     * zone, and a TIME WITH TIME ZONE is on 1970-01-01 (so it can be a day
+     * either side of it in the zone).
+     */
     private LocalDateTime localDateTime(int index, ZoneId zone, String to) throws SQLException {
         return switch (temporal(index)) {
             case null -> null;
@@ -397,7 +401,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             case LocalDateTime t -> t;
             case OffsetDateTime t -> t.atZoneSameInstant(zone).toLocalDateTime();
             case LocalTime t -> LocalDate.EPOCH.atTime(t);
-            case OffsetTime t -> LocalDate.EPOCH.atTime(t.toLocalTime());
+            case OffsetTime t -> LocalDate.EPOCH.atTime(t).atZoneSameInstant(zone).toLocalDateTime();
             default -> throw cantConvert(column(index), to);
         };
     }
@@ -412,15 +416,29 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         return d == null ? null : Date.valueOf(d.toLocalDate());
     }
 
+    /**
+     * The time in the JVM's time zone, with its milliseconds. A TIME WITH TIME
+     * ZONE (or TIMESTAMP WITH TIME ZONE) is converted to the JVM's time zone.
+     */
     @Override
     public Time getTime(int index) throws SQLException {
         if (temporal(index) instanceof LocalDate) {
             throw cantConvert(column(index), "Time");
         }
         LocalDateTime t = localDateTime(index, ZoneId.systemDefault(), "Time");
-        return t == null ? null : Time.valueOf(t.toLocalTime());
+        return t == null ? null : time(t.toLocalTime());
     }
 
+    /** A java.sql.Time with the milliseconds (Time.valueOf drops them). */
+    private static Time time(LocalTime t) {
+        return new Time(Time.valueOf(t).getTime() + t.getNano() / 1_000_000);
+    }
+
+    /**
+     * The timestamp in the JVM's time zone. A TIME WITH TIME ZONE (or
+     * TIMESTAMP WITH TIME ZONE) is converted to the JVM's time zone, and a
+     * TIME is on 1970-01-01.
+     */
     @Override
     public Timestamp getTimestamp(int index) throws SQLException {
         return switch (temporal(index)) {
@@ -435,6 +453,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         return switch (temporal(index)) {
             case null -> null;
             case OffsetDateTime t -> t.toInstant();
+            case OffsetTime t -> LocalDate.EPOCH.atTime(t).toInstant();
             default -> localDateTime(index, cal.getTimeZone().toZoneId(), to)
                     .atZone(cal.getTimeZone().toZoneId()).toInstant();
         };
@@ -561,6 +580,8 @@ public final class VsqlResultSet extends UnsupportedResultSet {
                 case LocalDateTime d when type == LocalDateTime.class -> d;
                 case LocalDate d when type == LocalDateTime.class -> d.atStartOfDay();
                 case OffsetTime d when type == OffsetTime.class -> d;
+                case OffsetTime d when type == LocalTime.class ->
+                        localDateTime(index, ZoneId.systemDefault(), type.getName()).toLocalTime();
                 case OffsetDateTime d when type == OffsetDateTime.class -> d;
                 case OffsetDateTime d when type == ZonedDateTime.class -> d.toZonedDateTime();
                 case OffsetDateTime d when type == Instant.class -> d.toInstant();

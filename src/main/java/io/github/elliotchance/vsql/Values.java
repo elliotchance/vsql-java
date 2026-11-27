@@ -52,7 +52,7 @@ final class Values {
             case Character c -> varchar(c.toString());
             // java.sql's types are local times (in the JVM's time zone).
             case java.sql.Date d -> date(d.toLocalDate());
-            case java.sql.Time t -> time(t.toLocalTime(), null);
+            case java.sql.Time t -> time(localTime(t), null);
             case java.sql.Timestamp t -> timestamp(t.toLocalDateTime(), null);
             case java.util.Date d -> timestamp(new java.sql.Timestamp(d.getTime()).toLocalDateTime(), null);
             case LocalDate d -> date(d);
@@ -142,6 +142,14 @@ final class Values {
     private static Param date(LocalDate d) {
         String s = d.format(DATE);
         return text(Native.SQL_TYPE_DATE, s.length(), 0, s);
+    }
+
+    /**
+     * The local time of a java.sql.Time, with its milliseconds
+     * (Time.toLocalTime drops them).
+     */
+    static LocalTime localTime(java.sql.Time t) {
+        return t.toLocalTime().withNano((int) Math.floorMod(t.getTime(), 1000L) * 1_000_000);
     }
 
     private static Param time(LocalTime t, ZoneOffset offset) throws SQLException {
