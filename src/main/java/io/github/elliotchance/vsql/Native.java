@@ -915,125 +915,178 @@ final class Native {
     }
 
     /**
-     * Fetches the next row, it's null after the last row. Each column is read
-     * as its kind (see Column.kind): a Long, Double, Float, String or byte[],
-     * or null for a NULL.
+     * Fetcher reads the rows of a cursor. Its buffers are allocated once and
+     * reused for every row (rather than an Arena for each row). A larger
+     * buffer for a long value (up to KEEP octets) is kept, so that the next
+     * value that long is read with one SQLGetData.
+     *
+     * <p>The memory is freed by the garbage collector when the Fetcher (and so
+     * its result set) is unreachable: a result set can be used by more than
+     * one thread (one at a time), so it can't be a confined Arena, and nothing
+     * can use the memory after it's freed. libvsql only writes to the buffers
+     * during SQLGetData, it doesn't keep them.
      */
-    static Object[] fetchRow(int stmt, Column[] columns) throws SQLException {
-        try (Arena arena = Arena.ofConfined()) {
-            short rc = (short) FETCH.invokeExact(stmt);
-            if (rc == SQL_NO_DATA) {
-                return null;
-            }
-            check(rc, SQL_HANDLE_STMT, stmt);
+    static final class Fetcher {
+        private static final int SIZE = 256;
+        private static final int KEEP = 1 << 20;
 
-            Object[] row = new Object[columns.length];
-            MemorySegment ind = arena.allocate(JAVA_INT);
-            MemorySegment number = arena.allocate(JAVA_LONG);
-            for (int i = 0; i < columns.length; i++) {
-                short n = (short) (i + 1);
-                switch (columns[i].kind()) {
-                    case INTEGER -> {
-                        check((short) GET_DATA.invokeExact(stmt, n, SQL_BIGINT, number, 8, ind), SQL_HANDLE_STMT, stmt);
-                        row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_LONG, 0);
-                    }
-                    case DOUBLE -> {
-                        check((short) GET_DATA.invokeExact(stmt, n, SQL_DOUBLE, number, 8, ind), SQL_HANDLE_STMT, stmt);
-                        row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_DOUBLE, 0);
-                    }
-                    case REAL -> {
-                        check((short) GET_DATA.invokeExact(stmt, n, SQL_REAL, number, 4, ind), SQL_HANDLE_STMT, stmt);
-                        row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_FLOAT, 0);
-                    }
-                    case TEXT -> row[i] = getString(arena, stmt, n, ind);
-                    case BINARY -> row[i] = getBytes(arena, stmt, n, ind);
-                }
-            }
+        private final int stmt;
+        private final Column[] columns;
+        private final MemorySegment ind;
+        private final MemorySegment number;
+        // At least SIZE octets (and at most KEEP), it's replaced by a larger
+        // one when a value needs it.
+        private MemorySegment buf;
 
-            return row;
-        } catch (SQLException e) {
-            throw e;
-        } catch (Throwable t) {
-            throw unexpected(t);
+        Fetcher(int stmt, Column[] columns) {
+            this.stmt = stmt;
+            this.columns = columns;
+            Arena arena = Arena.ofAuto();
+            ind = arena.allocate(JAVA_INT);
+            number = arena.allocate(JAVA_LONG);
+            buf = arena.allocate(SIZE);
         }
-    }
 
-    /**
-     * Reads a column as SQL_CHAR, it's null for a NULL. A string that doesn't
-     * fit in the buffer is read in pieces, the rest into a buffer that's the
-     * size of the rest of it.
-     */
-    private static String getString(Arena arena, int stmt, short n, MemorySegment ind) throws Throwable {
-        int size = 256;
-        MemorySegment buf = arena.allocate(size);
-        java.io.ByteArrayOutputStream s = null;
-        while (true) {
-            short rc = (short) GET_DATA.invokeExact(stmt, n, SQL_CHAR, buf, size, ind);
-            check(rc, SQL_HANDLE_STMT, stmt);
-            int length = ind.get(JAVA_INT, 0);
-            if (length == SQL_NULL_DATA) {
-                return null;
+        /**
+         * A buffer of at least size octets. One that's larger than KEEP is
+         * only used for one value, so a result set doesn't hold on to the
+         * memory of its longest value.
+         */
+        private MemorySegment buffer(int size) {
+            if (buf.byteSize() >= size) {
+                return buf;
             }
+            MemorySegment b = Arena.ofAuto().allocate(size);
+            if (size <= KEEP) {
+                buf = b;
+            }
+            return b;
+        }
 
-            // The rest of the string (length) didn't fit, so the buffer has a
-            // null terminated piece of it. The piece is always size - 1
-            // octets: it isn't read up to the first 0 octet, because the
-            // string can contain U+0000. It can end in the middle of a UTF-8
-            // character, so the octets are decoded at the end.
-            if (rc == SQL_SUCCESS_WITH_INFO && length >= size) {
-                byte[] piece = buf.asSlice(0, size - 1).toArray(JAVA_BYTE);
+        /**
+         * Fetches the next row, it's null after the last row. Each column is
+         * read as its kind (see Column.kind): a Long, Double, Float, String or
+         * byte[], or null for a NULL.
+         */
+        Object[] next() throws SQLException {
+            try {
+                short rc = (short) FETCH.invokeExact(stmt);
+                if (rc == SQL_NO_DATA) {
+                    return null;
+                }
+                check(rc, SQL_HANDLE_STMT, stmt);
+
+                Object[] row = new Object[columns.length];
+                for (int i = 0; i < columns.length; i++) {
+                    short n = (short) (i + 1);
+                    switch (columns[i].kind()) {
+                        case INTEGER -> {
+                            check((short) GET_DATA.invokeExact(stmt, n, SQL_BIGINT, number, 8, ind),
+                                    SQL_HANDLE_STMT, stmt);
+                            row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_LONG, 0);
+                        }
+                        case DOUBLE -> {
+                            check((short) GET_DATA.invokeExact(stmt, n, SQL_DOUBLE, number, 8, ind),
+                                    SQL_HANDLE_STMT, stmt);
+                            row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_DOUBLE, 0);
+                        }
+                        case REAL -> {
+                            check((short) GET_DATA.invokeExact(stmt, n, SQL_REAL, number, 4, ind),
+                                    SQL_HANDLE_STMT, stmt);
+                            row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_FLOAT, 0);
+                        }
+                        case TEXT -> row[i] = getString(n);
+                        case BINARY -> row[i] = getBytes(n);
+                    }
+                }
+
+                return row;
+            } catch (SQLException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unexpected(t);
+            }
+        }
+
+        /**
+         * Reads a column as SQL_CHAR, it's null for a NULL. A string that
+         * doesn't fit in the buffer is read in pieces, the rest into a buffer
+         * that's at least the size of the rest of it.
+         */
+        private String getString(short n) throws Throwable {
+            MemorySegment b = buf;
+            int size = (int) b.byteSize();
+            java.io.ByteArrayOutputStream s = null;
+            while (true) {
+                short rc = (short) GET_DATA.invokeExact(stmt, n, SQL_CHAR, b, size, ind);
+                check(rc, SQL_HANDLE_STMT, stmt);
+                int length = ind.get(JAVA_INT, 0);
+                if (length == SQL_NULL_DATA) {
+                    return null;
+                }
+
+                // The rest of the string (length) didn't fit, so the buffer
+                // has a null terminated piece of it. The piece is always
+                // size - 1 octets (the buffer can be larger): it isn't read up
+                // to the first 0 octet, because the string can contain U+0000.
+                // It can end in the middle of a UTF-8 character, so the octets
+                // are decoded at the end.
+                if (rc == SQL_SUCCESS_WITH_INFO && length >= size) {
+                    byte[] piece = b.asSlice(0, size - 1).toArray(JAVA_BYTE);
+                    if (s == null) {
+                        s = new java.io.ByteArrayOutputStream(length);
+                    }
+                    s.write(piece);
+                    size = length - piece.length + 1;
+                    b = buffer(size);
+                    continue;
+                }
+
+                byte[] last = b.asSlice(0, length).toArray(JAVA_BYTE);
                 if (s == null) {
-                    s = new java.io.ByteArrayOutputStream(length);
+                    return new String(last, StandardCharsets.UTF_8);
                 }
-                s.write(piece);
-                size = length - piece.length + 1;
-                buf = arena.allocate(size);
-                continue;
+                s.write(last);
+                return s.toString(StandardCharsets.UTF_8);
             }
-
-            byte[] last = buf.asSlice(0, length).toArray(JAVA_BYTE);
-            if (s == null) {
-                return new String(last, StandardCharsets.UTF_8);
-            }
-            s.write(last);
-            return s.toString(StandardCharsets.UTF_8);
         }
-    }
 
-    /**
-     * Reads a column as SQL_BINARY, it's null for a NULL. A value that doesn't
-     * fit in the buffer is read in pieces (like getString, but there's no null
-     * terminator).
-     */
-    private static byte[] getBytes(Arena arena, int stmt, short n, MemorySegment ind) throws Throwable {
-        int size = 256;
-        MemorySegment buf = arena.allocate(size);
-        java.io.ByteArrayOutputStream b = null;
-        while (true) {
-            short rc = (short) GET_DATA.invokeExact(stmt, n, SQL_BINARY, buf, size, ind);
-            check(rc, SQL_HANDLE_STMT, stmt);
-            int length = ind.get(JAVA_INT, 0);
-            if (length == SQL_NULL_DATA) {
-                return null;
-            }
-
-            // The rest of the value (length) didn't fit, so the buffer is full.
-            if (rc == SQL_SUCCESS_WITH_INFO && length > size) {
-                if (b == null) {
-                    b = new java.io.ByteArrayOutputStream(length);
+        /**
+         * Reads a column as SQL_BINARY, it's null for a NULL. A value that
+         * doesn't fit in the buffer is read in pieces (like getString, but
+         * there's no null terminator).
+         */
+        private byte[] getBytes(short n) throws Throwable {
+            MemorySegment b = buf;
+            int size = (int) b.byteSize();
+            java.io.ByteArrayOutputStream out = null;
+            while (true) {
+                short rc = (short) GET_DATA.invokeExact(stmt, n, SQL_BINARY, b, size, ind);
+                check(rc, SQL_HANDLE_STMT, stmt);
+                int length = ind.get(JAVA_INT, 0);
+                if (length == SQL_NULL_DATA) {
+                    return null;
                 }
-                b.write(buf.asSlice(0, size).toArray(JAVA_BYTE));
-                size = length - size;
-                buf = arena.allocate(size);
-                continue;
-            }
 
-            byte[] last = buf.asSlice(0, Math.min(length, size)).toArray(JAVA_BYTE);
-            if (b == null) {
-                return last;
+                // The rest of the value (length) didn't fit, so the first size
+                // octets of the buffer are full.
+                if (rc == SQL_SUCCESS_WITH_INFO && length > size) {
+                    if (out == null) {
+                        out = new java.io.ByteArrayOutputStream(length);
+                    }
+                    out.write(b.asSlice(0, size).toArray(JAVA_BYTE));
+                    size = length - size;
+                    b = buffer(size);
+                    continue;
+                }
+
+                byte[] last = b.asSlice(0, Math.min(length, size)).toArray(JAVA_BYTE);
+                if (out == null) {
+                    return last;
+                }
+                out.write(last);
+                return out.toByteArray();
             }
-            b.write(last);
-            return b.toByteArray();
         }
     }
 }

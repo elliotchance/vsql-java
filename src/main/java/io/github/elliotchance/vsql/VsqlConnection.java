@@ -189,7 +189,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         try {
             Native.execDirect(stmt, sql);
             Column[] columns = {Native.describeCol(stmt, 1)};
-            Object[] row = Native.fetchRow(stmt, columns);
+            Object[] row = new Native.Fetcher(stmt, columns).next();
             Native.closeCursor(stmt);
             return row == null || row[0] == null ? null : row[0].toString();
         } finally {
