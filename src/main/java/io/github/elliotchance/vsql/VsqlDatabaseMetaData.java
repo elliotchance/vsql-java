@@ -57,13 +57,20 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
      */
     @Override
     public String getDatabaseProductVersion() throws SQLException {
-        String v = info(Native.SQL_VSQL_BUILD_VERSION);
-        if (v.startsWith("v")) {
-            return v.substring(1);
+        return productVersion(info(Native.SQL_VSQL_BUILD_VERSION), info(Native.SQL_DBMS_VERSION));
+    }
+
+    /**
+     * The product version from SQL_VSQL_BUILD_VERSION (such as "v1.7.58", or
+     * a commit if it isn't from a release) and SQL_DBMS_VERSION (such as
+     * "01.07.0058").
+     */
+    static String productVersion(String buildVersion, String dbmsVersion) {
+        if (buildVersion.startsWith("v")) {
+            return buildVersion.substring(1);
         }
 
-        // SQL_DBMS_VERSION is "01.07.0058".
-        String[] parts = info(Native.SQL_DBMS_VERSION).split("\\.");
+        String[] parts = dbmsVersion.split("\\.");
         StringBuilder version = new StringBuilder();
         for (String part : parts) {
             version.append(version.isEmpty() ? "" : ".").append(Integer.parseInt(part));
@@ -331,6 +338,11 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
         return infoShort(Native.SQL_NULL_COLLATION);
     }
 
+    /** Whether an SQLGetInfo value (or some of its bits) is expected. */
+    private static boolean is(int value, int expected) {
+        return value == expected;
+    }
+
     /**
      * Whether vsql supports a feature or subfeature of the SQL standard (see
      * https://vsql.readthedocs.io/en/latest/sql-compliance.html), from
@@ -368,12 +380,12 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
 
     @Override
     public boolean dataDefinitionCausesTransactionCommit() throws SQLException {
-        return transactionCapable() == Native.SQL_TC_DDL_COMMIT;
+        return is(transactionCapable(), Native.SQL_TC_DDL_COMMIT);
     }
 
     @Override
     public boolean dataDefinitionIgnoredInTransactions() throws SQLException {
-        return transactionCapable() == Native.SQL_TC_DDL_IGNORE;
+        return is(transactionCapable(), Native.SQL_TC_DDL_IGNORE);
     }
 
     @Override
@@ -605,7 +617,7 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
 
     @Override
     public boolean nullsAreSortedHigh() throws SQLException {
-        return nullCollation() == Native.SQL_NC_HIGH;
+        return is(nullCollation(), Native.SQL_NC_HIGH);
     }
 
     /**
@@ -614,7 +626,7 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
      */
     @Override
     public boolean nullsAreSortedLow() throws SQLException {
-        return nullCollation() == Native.SQL_NC_LOW;
+        return is(nullCollation(), Native.SQL_NC_LOW);
     }
 
     @Override
@@ -674,12 +686,12 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
 
     @Override
     public boolean supportsAlterTableWithAddColumn() throws SQLException {
-        return (alterTable() & Native.SQL_AT_ADD_COLUMN) != 0;
+        return is(alterTable() & Native.SQL_AT_ADD_COLUMN, Native.SQL_AT_ADD_COLUMN);
     }
 
     @Override
     public boolean supportsAlterTableWithDropColumn() throws SQLException {
-        return (alterTable() & Native.SQL_AT_DROP_COLUMN) != 0;
+        return is(alterTable() & Native.SQL_AT_DROP_COLUMN, Native.SQL_AT_DROP_COLUMN);
     }
 
     @Override
@@ -735,12 +747,12 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
 
     @Override
     public boolean supportsDataDefinitionAndDataManipulationTransactions() throws SQLException {
-        return transactionCapable() == Native.SQL_TC_ALL;
+        return is(transactionCapable(), Native.SQL_TC_ALL);
     }
 
     @Override
     public boolean supportsDataManipulationTransactionsOnly() throws SQLException {
-        return transactionCapable() == Native.SQL_TC_DML;
+        return is(transactionCapable(), Native.SQL_TC_DML);
     }
 
     /** A correlation name can be the same as the name of its table. */
@@ -845,7 +857,7 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
 
     @Override
     public boolean supportsOuterJoins() throws SQLException {
-        return feature("F041", "03") && feature("F041", "04");
+        return feature("F041", "03") & feature("F041", "04");
     }
 
     /**
@@ -1005,8 +1017,9 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
         return new VsqlResultSet(TYPE_INFO, rows);
     }
 
+    /** A SMALLINT or INTEGER, which is a Long (see Native.Fetcher). */
     private static long number(Object v) {
-        return v instanceof Long l ? l : Long.parseLong(v.toString().trim());
+        return (Long) v;
     }
 
     /** A number (1 or 0) or NULL as a BOOLEAN ("TRUE" or "FALSE"). */

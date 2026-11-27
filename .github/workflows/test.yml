@@ -36,9 +36,40 @@ jobs:
           java-version: ${{ matrix.java }}
           cache: maven
       - run: mvn -B verify
+      # The coverage job checks the coverage of every OS. The classes must be
+      # the same as the coverage job's, so only Java 25's coverage is used.
+      - uses: actions/upload-artifact@v7
+        if: matrix.java == '25'
+        with:
+          name: coverage-${{ matrix.platform }}
+          path: target/jacoco.exec
+          if-no-files-found: error
       - name: Run the example
         shell: bash
         run: java --enable-native-access=ALL-UNNAMED -cp target/vsql-0.0.0-SNAPSHOT.jar example/Example.java
+
+  coverage:
+    name: 100% coverage
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-*
+          path: target/coverage
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Check the coverage of every OS
+        run: mvn -B compile jacoco:merge@merge jacoco:report jacoco:check@check
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-report
+          path: target/site/jacoco
 
   jar:
     name: Jar with every libvsql
