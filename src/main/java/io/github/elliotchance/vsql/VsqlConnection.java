@@ -371,7 +371,7 @@ public final class VsqlConnection extends UnsupportedConnection {
             int resultSetHoldability) throws SQLException {
         check();
         checkResultSet(resultSetType, resultSetConcurrency, resultSetHoldability);
-        return add(new VsqlStatement(this));
+        return add(new VsqlStatement(this, resultSetType));
     }
 
     @Override
@@ -390,7 +390,7 @@ public final class VsqlConnection extends UnsupportedConnection {
             int resultSetConcurrency, int resultSetHoldability) throws SQLException {
         check();
         checkResultSet(resultSetType, resultSetConcurrency, resultSetHoldability);
-        return add(new VsqlPreparedStatement(this, sql));
+        return add(new VsqlPreparedStatement(this, sql, resultSetType));
     }
 
     /** Only NO_GENERATED_KEYS is supported. */
@@ -402,10 +402,13 @@ public final class VsqlConnection extends UnsupportedConnection {
         return prepareStatement(sql);
     }
 
-    /** Result sets are forward only and read only, and close at commit. */
+    /**
+     * Result sets are forward only or scroll insensitive, read only, and close
+     * at commit.
+     */
     private static void checkResultSet(int type, int concurrency, int holdability) throws SQLException {
-        if (type != ResultSet.TYPE_FORWARD_ONLY) {
-            throw Errors.unsupported("a scrollable result set");
+        if (type != ResultSet.TYPE_FORWARD_ONLY && type != ResultSet.TYPE_SCROLL_INSENSITIVE) {
+            throw Errors.unsupported("a result set type other than TYPE_FORWARD_ONLY and TYPE_SCROLL_INSENSITIVE");
         }
         if (concurrency != ResultSet.CONCUR_READ_ONLY) {
             throw Errors.unsupported("an updatable result set");

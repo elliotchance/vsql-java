@@ -657,7 +657,7 @@ class VsqlTest {
         assertInstanceOf(VsqlConnection.class, conn.unwrap(Connection.class));
         assertThrows(SQLFeatureNotSupportedException.class, () -> conn.prepareCall("CALL foo()"));
         assertThrows(SQLFeatureNotSupportedException.class,
-                () -> conn.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY));
+                () -> conn.createStatement(ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_READ_ONLY));
     }
 
     /**
