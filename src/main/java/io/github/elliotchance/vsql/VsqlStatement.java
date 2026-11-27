@@ -373,6 +373,23 @@ public class VsqlStatement extends UnsupportedStatement {
         return maxFieldSize;
     }
 
+    /**
+     * Names the cursor of the statement's next result sets, so that a
+     * positioned UPDATE or DELETE ({@code WHERE CURRENT OF name}) on another
+     * statement of the connection can change its current row. The name is an
+     * identifier (so c is the same cursor as C, but not as "c"), it can't
+     * start with SQL_CUR, and two statements of a connection can't have the
+     * same name (SQLSTATE 34000). It can't be changed while the statement has
+     * an open result set (SQLSTATE 24000).
+     */
+    @Override
+    public void setCursorName(String name) throws SQLException {
+        synchronized (connection) {
+            check();
+            Native.setCursorName(handle(), name);
+        }
+    }
+
     /** There are no escapes to process, so it's ignored. */
     @Override
     public void setEscapeProcessing(boolean enable) throws SQLException {

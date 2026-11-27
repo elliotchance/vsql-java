@@ -305,6 +305,21 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
         return false;
     }
 
+    /**
+     * A positioned DELETE ({@code WHERE CURRENT OF}) can use the cursor of a
+     * result set, see Statement.setCursorName.
+     */
+    @Override
+    public boolean supportsPositionedDelete() {
+        return true;
+    }
+
+    /** See supportsPositionedDelete. */
+    @Override
+    public boolean supportsPositionedUpdate() {
+        return true;
+    }
+
     // The columns of getTypeInfo.
     private static final Column[] TYPE_INFO = {
         new Column("TYPE_NAME", Native.SQL_VARCHAR, 512, (short) 0, false),

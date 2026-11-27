@@ -80,6 +80,32 @@ for it to finish (for up to 5 seconds, then it's SQLSTATE `40001`), so the
 driver's default is `READ COMMITTED`. The isolation level and read only don't
 apply to statements that are executed with auto-commit on.
 
+## Positioned updates
+
+A statement's cursor can be named with `setCursorName()` before it's executed,
+so that a positioned `UPDATE` or `DELETE` (`WHERE CURRENT OF`) on another
+statement of the connection can change the row that its result set is on:
+
+```java
+Statement s = conn.createStatement();
+s.setCursorName("c");
+ResultSet rs = s.executeQuery("SELECT x FROM foo FOR UPDATE");
+try (Statement u = conn.createStatement()) {
+    while (rs.next()) {
+        u.executeUpdate("UPDATE foo SET x = x + 1 WHERE CURRENT OF c");
+    }
+}
+```
+
+The name is an identifier (so `c` is the same cursor as `C`, but not as
+`"c"`), and two statements of a connection can't have the same one.
+`rs.getCursorName()` is the name as it was given, or a unique one that starts
+with `SQL_CUR` if the statement wasn't given one. A positioned
+statement can only be prepared (`prepareStatement()`) while the cursor is open,
+and it can't be executed again once the cursor's statement has executed
+something else. With auto-commit on, the changes are committed when the result
+set is closed (or after its last row).
+
 ## Types
 
 | SQL                        | `getObject`          | `getObject(i, Class)`      |
