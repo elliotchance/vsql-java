@@ -123,7 +123,36 @@ final class Native {
     static final short SQL_DESC_LENGTH = 1003;
     static final short SQL_DESC_DATETIME_INTERVAL_PRECISION = 26;
 
+    static final short SQL_MAXIMUM_DRIVER_CONNECTIONS = 0;
+    static final short SQL_MAXIMUM_CONCURRENT_ACTIVITIES = 1;
+    static final short SQL_SEARCH_PATTERN_ESCAPE = 14;
     static final short SQL_DBMS_VERSION = 18;
+    static final short SQL_MAXIMUM_COLUMN_NAME_LENGTH = 30;
+    static final short SQL_MAXIMUM_CURSOR_NAME_LENGTH = 31;
+    static final short SQL_MAXIMUM_SCHEMA_NAME_LENGTH = 32;
+    static final short SQL_MAXIMUM_CATALOG_NAME_LENGTH = 34;
+    static final short SQL_MAXIMUM_TABLE_NAME_LENGTH = 35;
+    static final short SQL_TRANSACTION_CAPABLE = 46;
+    static final short SQL_INTEGRITY = 73;
+    static final short SQL_NULL_COLLATION = 85;
+    static final short SQL_ALTER_TABLE = 86;
+    static final short SQL_SPECIAL_CHARACTERS = 94;
+    static final short SQL_MAXIMUM_COLUMNS_IN_GROUP_BY = 97;
+    static final short SQL_MAXIMUM_COLUMNS_IN_ORDER_BY = 99;
+    static final short SQL_MAXIMUM_COLUMNS_IN_SELECT = 100;
+    static final short SQL_MAXIMUM_COLUMNS_IN_TABLE = 101;
+    static final short SQL_MAXIMUM_TABLES_IN_SELECT = 106;
+    static final short SQL_MAXIMUM_USER_NAME_LENGTH = 107;
+    static final short SQL_MAXIMUM_IDENTIFIER_LENGTH = 10005;
+    static final short SQL_MAXIMUM_STMT_OCTETS = 20000;
+    static final int SQL_AT_ADD_COLUMN = 0x00000001;
+    static final int SQL_AT_DROP_COLUMN = 0x00000002;
+    static final short SQL_NC_HIGH = 1;
+    static final short SQL_NC_LOW = 2;
+    static final short SQL_TC_DML = 1;
+    static final short SQL_TC_ALL = 2;
+    static final short SQL_TC_DDL_COMMIT = 3;
+    static final short SQL_TC_DDL_IGNORE = 4;
     static final short SQL_VSQL_BUILD_VERSION = 11000;
     static final short SQL_VSQL_FILE_READ_VERSION = 11008;
     static final short SQL_VSQL_FILE_WRITE_VERSION = 11009;
@@ -149,6 +178,7 @@ final class Native {
     private static final MethodHandle GET_DIAG_REC;
     private static final MethodHandle GET_DIAG_FIELD;
     private static final MethodHandle GET_INFO;
+    private static final MethodHandle GET_FEATURE_INFO;
     private static final MethodHandle GET_STMT_ATTR;
     private static final MethodHandle GET_DESC_FIELD;
     private static final MethodHandle GET_DESC_REC;
@@ -193,6 +223,8 @@ final class Native {
         GET_DIAG_FIELD = handle(linker, lib, "SQLGetDiagField", JAVA_SHORT, JAVA_INT, JAVA_SHORT,
                 JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS);
         GET_INFO = handle(linker, lib, "SQLGetInfo", JAVA_INT, JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS);
+        GET_FEATURE_INFO = handle(linker, lib, "SQLGetFeatureInfo", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS,
+                JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS);
         GET_STMT_ATTR = handle(linker, lib, "SQLGetStmtAttr", JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS);
         GET_DESC_FIELD = handle(linker, lib, "SQLGetDescField", JAVA_INT, JAVA_SHORT, JAVA_SHORT,
                 ADDRESS, JAVA_INT, ADDRESS);
@@ -588,6 +620,41 @@ final class Native {
             check((short) GET_INFO.invokeExact(dbc, infoType, value, (short) 0, MemorySegment.NULL),
                     SQL_HANDLE_DBC, dbc);
             return value.get(JAVA_SHORT, 0);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /** An SQLINTEGER from SQLGetInfo. */
+    static int getInfoInt(int dbc, short infoType) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment value = arena.allocate(JAVA_INT);
+            check((short) GET_INFO.invokeExact(dbc, infoType, value, (short) 0, MemorySegment.NULL),
+                    SQL_HANDLE_DBC, dbc);
+            return value.get(JAVA_INT, 0);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * Whether vsql supports a feature (such as "F401"), or a subfeature (such
+     * as "E061" and "05") if subFeatureId isn't null, from SQLGetFeatureInfo.
+     * An unknown feature is SQLSTATE HY024.
+     */
+    static boolean getFeatureInfo(int dbc, String featureId, String subFeatureId) throws SQLException {
+        String type = subFeatureId == null ? "FEATURE" : "SUBFEATURE";
+        short nts = SQL_NTS;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment sub = subFeatureId == null ? MemorySegment.NULL : arena.allocateFrom(subFeatureId);
+            MemorySegment supported = arena.allocate(JAVA_SHORT);
+            check((short) GET_FEATURE_INFO.invokeExact(dbc, arena.allocateFrom(type), nts,
+                    arena.allocateFrom(featureId), nts, sub, nts, supported), SQL_HANDLE_DBC, dbc);
+            return supported.get(JAVA_SHORT, 0) != 0;
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {

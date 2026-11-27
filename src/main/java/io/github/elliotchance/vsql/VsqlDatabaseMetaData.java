@@ -3,10 +3,13 @@ package io.github.elliotchance.vsql;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.RowIdLifetime;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Information about vsql and the driver, see {@link Connection#getMetaData()}.
@@ -15,6 +18,7 @@ import java.util.List;
  */
 public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
     private final VsqlConnection connection;
+    private final Map<String, Boolean> features = new HashMap<>();
 
     VsqlDatabaseMetaData(VsqlConnection connection) {
         this.connection = connection;
@@ -305,6 +309,545 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
         return false;
     }
 
+    private short infoShort(short infoType) throws SQLException {
+        synchronized (connection) {
+            connection.check();
+            return Native.getInfoShort(connection.dbc(), infoType);
+        }
+    }
+
+    private int alterTable() throws SQLException {
+        synchronized (connection) {
+            connection.check();
+            return Native.getInfoInt(connection.dbc(), Native.SQL_ALTER_TABLE);
+        }
+    }
+
+    private short transactionCapable() throws SQLException {
+        return infoShort(Native.SQL_TRANSACTION_CAPABLE);
+    }
+
+    private short nullCollation() throws SQLException {
+        return infoShort(Native.SQL_NULL_COLLATION);
+    }
+
+    /**
+     * Whether vsql supports a feature or subfeature of the SQL standard (see
+     * https://vsql.readthedocs.io/en/latest/sql-compliance.html), from
+     * SQLGetFeatureInfo. Each answer is kept, since it's a query of the
+     * INFORMATION_SCHEMA.SQL_FEATURES view.
+     */
+    private boolean feature(String featureId, String subFeatureId) throws SQLException {
+        String key = subFeatureId == null ? featureId : featureId + "-" + subFeatureId;
+        synchronized (connection) {
+            connection.check();
+            Boolean supported = features.get(key);
+            if (supported == null) {
+                supported = Native.getFeatureInfo(connection.dbc(), featureId, subFeatureId);
+                features.put(key, supported);
+            }
+            return supported;
+        }
+    }
+
+    private boolean feature(String featureId) throws SQLException {
+        return feature(featureId, null);
+    }
+
+    /** There are no procedures (or privileges). */
+    @Override
+    public boolean allProceduresAreCallable() {
+        return true;
+    }
+
+    /** There are no privileges. */
+    @Override
+    public boolean allTablesAreSelectable() {
+        return true;
+    }
+
+    @Override
+    public boolean dataDefinitionCausesTransactionCommit() throws SQLException {
+        return transactionCapable() == Native.SQL_TC_DDL_COMMIT;
+    }
+
+    @Override
+    public boolean dataDefinitionIgnoredInTransactions() throws SQLException {
+        return transactionCapable() == Native.SQL_TC_DDL_IGNORE;
+    }
+
+    @Override
+    public boolean deletesAreDetected(int type) {
+        return false;
+    }
+
+    /** There's no maximum row size. */
+    @Override
+    public boolean doesMaxRowSizeIncludeBlobs() {
+        return false;
+    }
+
+    @Override
+    public String getCatalogSeparator() {
+        return ".";
+    }
+
+    @Override
+    public String getCatalogTerm() {
+        return "catalog";
+    }
+
+    @Override
+    public String getExtraNameCharacters() throws SQLException {
+        return info(Native.SQL_SPECIAL_CHARACTERS);
+    }
+
+    @Override
+    public int getMaxBinaryLiteralLength() {
+        return 0;
+    }
+
+    @Override
+    public int getMaxCatalogNameLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_CATALOG_NAME_LENGTH);
+    }
+
+    @Override
+    public int getMaxCharLiteralLength() {
+        return 0;
+    }
+
+    @Override
+    public int getMaxColumnNameLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_COLUMN_NAME_LENGTH);
+    }
+
+    @Override
+    public int getMaxColumnsInGroupBy() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_COLUMNS_IN_GROUP_BY);
+    }
+
+    @Override
+    public int getMaxColumnsInIndex() {
+        return 0;
+    }
+
+    @Override
+    public int getMaxColumnsInOrderBy() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_COLUMNS_IN_ORDER_BY);
+    }
+
+    @Override
+    public int getMaxColumnsInSelect() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_COLUMNS_IN_SELECT);
+    }
+
+    @Override
+    public int getMaxColumnsInTable() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_COLUMNS_IN_TABLE);
+    }
+
+    @Override
+    public int getMaxConnections() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_DRIVER_CONNECTIONS);
+    }
+
+    @Override
+    public int getMaxCursorNameLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_CURSOR_NAME_LENGTH);
+    }
+
+    @Override
+    public int getMaxIndexLength() {
+        return 0;
+    }
+
+    @Override
+    public int getMaxProcedureNameLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_IDENTIFIER_LENGTH);
+    }
+
+    @Override
+    public int getMaxRowSize() {
+        return 0;
+    }
+
+    @Override
+    public int getMaxSchemaNameLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_SCHEMA_NAME_LENGTH);
+    }
+
+    @Override
+    public int getMaxStatementLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_STMT_OCTETS);
+    }
+
+    @Override
+    public int getMaxStatements() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_CONCURRENT_ACTIVITIES);
+    }
+
+    @Override
+    public int getMaxTableNameLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_TABLE_NAME_LENGTH);
+    }
+
+    @Override
+    public int getMaxTablesInSelect() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_TABLES_IN_SELECT);
+    }
+
+    @Override
+    public int getMaxUserNameLength() throws SQLException {
+        return infoShort(Native.SQL_MAXIMUM_USER_NAME_LENGTH);
+    }
+
+    /**
+     * The Open Group CLI math functions that vsql has (with the same name and
+     * arguments). There are no escapes, so they're called by their names.
+     */
+    @Override
+    public String getNumericFunctions() {
+        return "ABS,ACOS,ASIN,ATAN,ATAN2,CEILING,COS,DEGREES,EXP,FLOOR,LOG10,MOD,POWER,RADIANS,"
+                + "ROUND,SIGN,SIN,SQRT,TAN";
+    }
+
+    @Override
+    public String getProcedureTerm() {
+        return "procedure";
+    }
+
+    @Override
+    public RowIdLifetime getRowIdLifetime() {
+        return RowIdLifetime.ROWID_UNSUPPORTED;
+    }
+
+    /**
+     * The reserved words of vsql (those of SQL:2023, and a few of its own,
+     * such as SHOW) that aren't reserved words in SQL:2003.
+     */
+    @Override
+    public String getSQLKeywords() {
+        return "ABSENT,ACOS,ANY_VALUE,ARRAY_AGG,ARRAY_MAX_CARDINALITY,ASIN,ATAN,"
+                + "BEGIN_FRAME,BEGIN_PARTITION,BTRIM,CLASSIFIER,CONTAINS,COPY,COS,COSH,"
+                + "CURRENT_CATALOG,CURRENT_ROW,CURRENT_SCHEMA,DECFLOAT,DEFINE,EMPTY,"
+                + "END_FRAME,END_PARTITION,EQUALS,FIRST_VALUE,FRAME_ROW,GREATEST,GROUPS,"
+                + "INITIAL,JSON,JSON_ARRAY,JSON_ARRAYAGG,JSON_EXISTS,JSON_OBJECT,"
+                + "JSON_OBJECTAGG,JSON_QUERY,JSON_SCALAR,JSON_SERIALIZE,JSON_TABLE,"
+                + "JSON_TABLE_PRIMITIVE,JSON_VALUE,LAG,LAST_VALUE,LEAD,LEAST,LIKE_REGEX,"
+                + "LISTAGG,LOG,LOG10,LPAD,LTRIM,MATCHES,MATCH_NUMBER,MATCH_RECOGNIZE,"
+                + "NTH_VALUE,NTILE,OCCURRENCES_REGEX,OFFSET,OMIT,ONE,PATTERN,PER,PERCENT,"
+                + "PERIOD,PORTION,POSITION_REGEX,PRECEDES,PTF,RPAD,RTRIM,RUNNING,SEEK,"
+                + "SHOW,SIN,SINH,SKIP,SUBSET,SUBSTRING_REGEX,SUCCEEDS,SYSTEM_TIME,TAN,"
+                + "TANH,TRANSLATE_REGEX,TRIM_ARRAY,TRUNCATE,VALUE_OF,VARBINARY,"
+                + "VERSIONING";
+    }
+
+    @Override
+    public String getSchemaTerm() {
+        return "schema";
+    }
+
+    @Override
+    public String getSearchStringEscape() throws SQLException {
+        return info(Native.SQL_SEARCH_PATTERN_ESCAPE);
+    }
+
+    /**
+     * The Open Group CLI string functions that vsql has, see
+     * getNumericFunctions.
+     */
+    @Override
+    public String getStringFunctions() {
+        return "CHAR_LENGTH,CHARACTER_LENGTH,CONCAT,LENGTH,LOWER,LTRIM,OCTET_LENGTH,POSITION,"
+                + "REPEAT,REPLACE,RTRIM,SUBSTRING,TRIM,UPPER";
+    }
+
+    /** vsql has none of the Open Group CLI system functions. */
+    @Override
+    public String getSystemFunctions() {
+        return "";
+    }
+
+    /**
+     * The Open Group CLI date and time functions that vsql has, see
+     * getNumericFunctions.
+     */
+    @Override
+    public String getTimeDateFunctions() {
+        return "CURRENT_DATE,CURRENT_TIME,CURRENT_TIMESTAMP,EXTRACT,NOW";
+    }
+
+    @Override
+    public boolean insertsAreDetected(int type) {
+        return false;
+    }
+
+    @Override
+    public boolean isCatalogAtStart() {
+        return true;
+    }
+
+    @Override
+    public boolean nullPlusNonNullIsNull() {
+        return true;
+    }
+
+    @Override
+    public boolean nullsAreSortedAtEnd() {
+        return false;
+    }
+
+    @Override
+    public boolean nullsAreSortedAtStart() {
+        return false;
+    }
+
+    @Override
+    public boolean nullsAreSortedHigh() throws SQLException {
+        return nullCollation() == Native.SQL_NC_HIGH;
+    }
+
+    /**
+     * NULL is less than any other value (unless an ORDER BY has NULLS FIRST or
+     * NULLS LAST).
+     */
+    @Override
+    public boolean nullsAreSortedLow() throws SQLException {
+        return nullCollation() == Native.SQL_NC_LOW;
+    }
+
+    @Override
+    public boolean othersDeletesAreVisible(int type) {
+        return false;
+    }
+
+    @Override
+    public boolean othersInsertsAreVisible(int type) {
+        return false;
+    }
+
+    @Override
+    public boolean othersUpdatesAreVisible(int type) {
+        return false;
+    }
+
+    @Override
+    public boolean ownDeletesAreVisible(int type) {
+        return false;
+    }
+
+    @Override
+    public boolean ownInsertsAreVisible(int type) {
+        return false;
+    }
+
+    @Override
+    public boolean ownUpdatesAreVisible(int type) {
+        return false;
+    }
+
+    @Override
+    public boolean storesLowerCaseQuotedIdentifiers() {
+        return false;
+    }
+
+    @Override
+    public boolean storesUpperCaseQuotedIdentifiers() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsANSI92EntryLevelSQL() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsANSI92FullSQL() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsANSI92IntermediateSQL() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsAlterTableWithAddColumn() throws SQLException {
+        return (alterTable() & Native.SQL_AT_ADD_COLUMN) != 0;
+    }
+
+    @Override
+    public boolean supportsAlterTableWithDropColumn() throws SQLException {
+        return (alterTable() & Native.SQL_AT_DROP_COLUMN) != 0;
+    }
+
+    @Override
+    public boolean supportsCatalogsInDataManipulation() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsCatalogsInIndexDefinitions() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsCatalogsInPrivilegeDefinitions() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsCatalogsInProcedureCalls() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsCatalogsInTableDefinitions() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsColumnAliasing() throws SQLException {
+        return feature("E051", "05");
+    }
+
+    /** There are no escapes, so there's no CONVERT function (vsql has CAST). */
+    @Override
+    public boolean supportsConvert() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsConvert(int fromType, int toType) {
+        return false;
+    }
+
+    @Override
+    public boolean supportsCoreSQLGrammar() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsCorrelatedSubqueries() throws SQLException {
+        return feature("E061", "13");
+    }
+
+    @Override
+    public boolean supportsDataDefinitionAndDataManipulationTransactions() throws SQLException {
+        return transactionCapable() == Native.SQL_TC_ALL;
+    }
+
+    @Override
+    public boolean supportsDataManipulationTransactionsOnly() throws SQLException {
+        return transactionCapable() == Native.SQL_TC_DML;
+    }
+
+    /** A correlation name can be the same as the name of its table. */
+    @Override
+    public boolean supportsDifferentTableCorrelationNames() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsExpressionsInOrderBy() throws SQLException {
+        return feature("E121", "03");
+    }
+
+    @Override
+    public boolean supportsExtendedSQLGrammar() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsFullOuterJoins() throws SQLException {
+        return feature("F401");
+    }
+
+    @Override
+    public boolean supportsGroupBy() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsGroupByBeyondSelect() throws SQLException {
+        return feature("E051", "04");
+    }
+
+    @Override
+    public boolean supportsGroupByUnrelated() throws SQLException {
+        return feature("E051", "04");
+    }
+
+    @Override
+    public boolean supportsIntegrityEnhancementFacility() throws SQLException {
+        return "Y".equals(info(Native.SQL_INTEGRITY));
+    }
+
+    @Override
+    public boolean supportsLikeEscapeClause() throws SQLException {
+        return feature("E061", "05");
+    }
+
+    @Override
+    public boolean supportsLimitedOuterJoins() throws SQLException {
+        return supportsOuterJoins();
+    }
+
+    @Override
+    public boolean supportsMinimumSQLGrammar() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsMultipleOpenResults() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsMultipleTransactions() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsNonNullableColumns() {
+        return true;
+    }
+
+    /**
+     * A result set is closed when its transaction ends, see
+     * getResultSetHoldability.
+     */
+    @Override
+    public boolean supportsOpenCursorsAcrossCommit() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsOpenCursorsAcrossRollback() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsOpenStatementsAcrossCommit() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsOpenStatementsAcrossRollback() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsOrderByUnrelated() throws SQLException {
+        return feature("E121", "02");
+    }
+
+    @Override
+    public boolean supportsOuterJoins() throws SQLException {
+        return feature("F041", "03") && feature("F041", "04");
+    }
+
     /**
      * A positioned DELETE ({@code WHERE CURRENT OF}) can use the cursor of a
      * result set, see Statement.setCursorName.
@@ -318,6 +861,92 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
     @Override
     public boolean supportsPositionedUpdate() {
         return true;
+    }
+
+    @Override
+    public boolean supportsSchemasInDataManipulation() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsSchemasInIndexDefinitions() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsSchemasInPrivilegeDefinitions() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsSchemasInProcedureCalls() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsSchemasInTableDefinitions() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsSelectForUpdate() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsStatementPooling() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsStoredFunctionsUsingCallSyntax() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsSubqueriesInComparisons() throws SQLException {
+        return feature("E061", "09");
+    }
+
+    @Override
+    public boolean supportsSubqueriesInExists() throws SQLException {
+        return feature("E061", "08");
+    }
+
+    @Override
+    public boolean supportsSubqueriesInIns() throws SQLException {
+        return feature("E061", "11");
+    }
+
+    @Override
+    public boolean supportsSubqueriesInQuantifieds() throws SQLException {
+        return feature("E061", "12");
+    }
+
+    @Override
+    public boolean supportsTableCorrelationNames() throws SQLException {
+        return feature("E051", "08");
+    }
+
+    @Override
+    public boolean supportsUnion() throws SQLException {
+        return feature("E071", "01");
+    }
+
+    @Override
+    public boolean supportsUnionAll() throws SQLException {
+        return feature("E071", "02");
+    }
+
+    @Override
+    public boolean updatesAreDetected(int type) {
+        return false;
+    }
+
+    /** The database is one file. */
+    @Override
+    public boolean usesLocalFilePerTable() {
+        return false;
     }
 
     // The columns of getTypeInfo.
