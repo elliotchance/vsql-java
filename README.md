@@ -43,6 +43,26 @@ schema of unqualified table names (`PUBLIC` by default), and the name is exact
 `conn.setCatalog()` changes the current catalog. A schema or catalog that
 doesn't exist is SQLSTATE `3F000` or `3D000`.
 
+A connection's initial settings can be connection properties, in the
+`Properties` or after the path in the URL, each after a `;` (so a path that
+contains a `;` can't be in a URL):
+
+```java
+DriverManager.getConnection("jdbc:vsql:test.vsql;readOnly=true;autoCommit=false");
+```
+
+| Property               | Values                                                                  | Default          |
+|------------------------|-------------------------------------------------------------------------|------------------|
+| `autoCommit`           | `true`, `false`                                                         | `true`           |
+| `readOnly`             | `true`, `false`                                                         | `false`          |
+| `transactionIsolation` | `READ_UNCOMMITTED`, `READ_COMMITTED`, `REPEATABLE_READ`, `SERIALIZABLE` | `READ_COMMITTED` |
+
+A property in the URL replaces the same property in the `Properties` (or the
+one set on a `VsqlDataSource`, which has a setter for each). An invalid value,
+or an unknown property in the URL, is SQLSTATE `08001`. Unknown properties in
+the `Properties` are ignored, since they often have others (such as `user` and
+`password`, vsql doesn't have users).
+
 See [example/Example.java](example/Example.java) for a complete program, and the
 [package documentation](src/main/java/io/github/elliotchance/vsql/package-info.java)
 for the Java type of each SQL type.
