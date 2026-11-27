@@ -752,6 +752,25 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         return statement;
     }
 
+    /**
+     * The name of the statement's cursor, as it was given to
+     * Statement.setCursorName, which a positioned UPDATE or DELETE
+     * ({@code WHERE CURRENT OF}) on another statement of the connection can
+     * use. A statement that wasn't given a name has a unique one that starts
+     * with "SQL_CUR". A DatabaseMetaData result set doesn't have a cursor
+     * (SQLSTATE 24000).
+     */
+    @Override
+    public String getCursorName() throws SQLException {
+        synchronized (lock) {
+            check();
+            if (statement == null) {
+                throw new SQLException("vsql: the result set doesn't have a cursor", "24000");
+            }
+            return Native.getCursorName(statement.stmt);
+        }
+    }
+
     /** The number of the current row (starting at 1), or 0 if there isn't one. */
     @Override
     public int getRow() throws SQLException {

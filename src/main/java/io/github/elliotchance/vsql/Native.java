@@ -158,6 +158,8 @@ final class Native {
     private static final MethodHandle GET_DESC_FIELD;
     private static final MethodHandle GET_DESC_REC;
     private static final MethodHandle GET_TYPE_INFO;
+    private static final MethodHandle SET_CURSOR_NAME;
+    private static final MethodHandle GET_CURSOR_NAME;
 
     // libvsql reads the value of SQL_ATTR_AUTOCOMMIT after SQLSetConnectAttr
     // returns, so it's never freed.
@@ -202,6 +204,8 @@ final class Native {
         GET_DESC_REC = handle(linker, lib, "SQLGetDescRec", JAVA_INT, JAVA_SHORT, ADDRESS, JAVA_SHORT,
                 ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS);
         GET_TYPE_INFO = handle(linker, lib, "SQLGetTypeInfo", JAVA_INT, JAVA_SHORT);
+        SET_CURSOR_NAME = handle(linker, lib, "SQLSetCursorName", JAVA_INT, ADDRESS, JAVA_SHORT);
+        GET_CURSOR_NAME = handle(linker, lib, "SQLGetCursorName", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS);
 
         // libvsql initializes itself (and its garbage collector) in the first
         // routine that's called, if it wasn't when it was loaded (see load).
@@ -687,6 +691,51 @@ final class Native {
             throw e;
         } catch (Throwable t) {
             throw unexpected(t);
+        }
+    }
+
+    /**
+     * Names the cursor of a statement with SQLSetCursorName. The name is an
+     * identifier (so c and C are the same cursor).
+     */
+    static void setCursorName(int stmt, String name) throws SQLException {
+        int length = name == null ? 0 : utf8Length(name);
+        if (length > Short.MAX_VALUE) {
+            throw Errors.sql("HY090", "the cursor name is too long");
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment value = name == null ? MemorySegment.NULL : utf8(arena, name);
+            check((short) SET_CURSOR_NAME.invokeExact(stmt, value, (short) length), SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * The name of the cursor of a statement, from SQLGetCursorName. A
+     * statement that wasn't given one has a unique name that starts with
+     * "SQL_CUR".
+     */
+    static String getCursorName(int stmt) throws SQLException {
+        int size = 129;
+        while (true) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment value = arena.allocate(size);
+                MemorySegment length = arena.allocate(JAVA_SHORT);
+                check((short) GET_CURSOR_NAME.invokeExact(stmt, value, (short) size, length), SQL_HANDLE_STMT, stmt);
+                int n = length.get(JAVA_SHORT, 0);
+                if (n >= size) {
+                    size = n + 1;
+                    continue;
+                }
+                return string(value, n);
+            } catch (SQLException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unexpected(t);
+            }
         }
     }
 
