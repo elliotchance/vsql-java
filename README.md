@@ -181,7 +181,11 @@ cursor, and whether vsql dropped some of the conditions:
 ## Metadata
 
 `DatabaseMetaData.getDatabaseProductVersion()` is the vsql release that libvsql
-is from, and `getTypeInfo()` describes each data type. `VsqlDatabaseMetaData`
+is from, and `getTypeInfo()` describes each data type. The methods that
+describe what vsql supports (such as `supportsFullOuterJoins()`,
+`getSQLKeywords()`, `nullsAreSortedLow()` and `getMaxTableNameLength()`) are
+read from libvsql where it has them (`SQLGetInfo`, and `SQLGetFeatureInfo` for
+the features of the SQL standard that vsql supports). `VsqlDatabaseMetaData`
 (`conn.getMetaData().unwrap(VsqlDatabaseMetaData.class)`) also has how libvsql
 was built (`getBuildCommit()`, `getBuildDate()`, `getVVersion()`, `getVCommit()`,
 `getCCompiler()`, `getOperatingSystem()` and `getMachine()`) and the file
