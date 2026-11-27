@@ -47,25 +47,48 @@ public class VsqlStatement extends UnsupportedStatement {
         return stmt;
     }
 
-    /** Closes the result set, if it's open. */
+    /**
+     * Closes the result set, if it's open. This completes the statement, so
+     * it's closed too with closeOnCompletion (such as at the end of a
+     * transaction).
+     */
     void closeResultSet() throws SQLException {
+        closeResultSet(true);
+    }
+
+    /**
+     * Closes the result set without completing the statement, because the
+     * statement is executed again (or moves to its next result). JDBC says
+     * that this doesn't close a statement with closeOnCompletion.
+     */
+    void discardResultSet() throws SQLException {
+        closeResultSet(false);
+    }
+
+    private void closeResultSet(boolean completes) throws SQLException {
         synchronized (connection) {
             if (resultSet != null) {
                 VsqlResultSet rs = resultSet;
                 resultSet = null;
-                rs.close();
+                try {
+                    rs.close();
+                } finally {
+                    if (completes && closeOnCompletion) {
+                        close();
+                    }
+                }
             }
         }
     }
 
-    /** Called by the result set when it's closed. */
+    /** Called by the result set when it's closed (by the user). */
     void resultSetClosed(VsqlResultSet rs) throws SQLException {
         synchronized (connection) {
             if (resultSet == rs) {
                 resultSet = null;
-            }
-            if (closeOnCompletion && resultSet == null) {
-                close();
+                if (closeOnCompletion) {
+                    close();
+                }
             }
         }
     }
@@ -73,7 +96,7 @@ public class VsqlStatement extends UnsupportedStatement {
     /** Prepares to execute: closes the result set and starts a transaction. */
     void beforeExecute() throws SQLException {
         check();
-        closeResultSet();
+        discardResultSet();
         updateCount = -1;
         connection.begin();
     }
@@ -122,7 +145,7 @@ public class VsqlStatement extends UnsupportedStatement {
     public long executeLargeUpdate(String sql) throws SQLException {
         synchronized (connection) {
             if (execute(sql)) {
-                closeResultSet();
+                discardResultSet();
                 throw new SQLException("vsql: the statement is a query", "07000");
             }
             return updateCount;
@@ -180,7 +203,7 @@ public class VsqlStatement extends UnsupportedStatement {
     public boolean getMoreResults(int current) throws SQLException {
         synchronized (connection) {
             check();
-            closeResultSet();
+            discardResultSet();
             updateCount = -1;
             return false;
         }
@@ -271,6 +294,11 @@ public class VsqlStatement extends UnsupportedStatement {
         }
     }
 
+    /**
+     * The statement is closed when its result set is closed by the user, or
+     * by the end of the transaction. Executing the statement again (or
+     * {@link #getMoreResults()}) closes the result set, but not the statement.
+     */
     @Override
     public void closeOnCompletion() throws SQLException {
         check();
