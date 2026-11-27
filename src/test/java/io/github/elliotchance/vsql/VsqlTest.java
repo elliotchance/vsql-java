@@ -596,11 +596,9 @@ class VsqlTest {
     @Test
     void readOnly() throws SQLException {
         exec("CREATE TABLE foo (x INTEGER)");
+        exec("INSERT INTO foo (x) VALUES (1)");
         conn.setReadOnly(true);
         assertTrue(conn.isReadOnly());
-
-        // It doesn't apply with auto-commit on.
-        exec("INSERT INTO foo (x) VALUES (1)");
 
         conn.setAutoCommit(false);
         assertEquals(1, scalar(conn, "SELECT COUNT(*) FROM foo"));

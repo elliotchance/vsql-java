@@ -32,9 +32,11 @@ import java.util.concurrent.Executor;
  * statement starts a transaction, which is ended by {@link #commit()} or
  * {@link #rollback()}, and can have savepoints. Each transaction has the
  * isolation level of {@link #setTransactionIsolation(int)} (READ COMMITTED by
- * default), and is READ ONLY if {@link #setReadOnly(boolean)} is true. They
- * don't apply to the statements that are executed with auto-commit on, which
- * have vsql's defaults (SERIALIZABLE and READ WRITE).
+ * default), and is READ ONLY if {@link #setReadOnly(boolean)} is true. The
+ * statements that are executed with auto-commit on are also READ ONLY then,
+ * but they have vsql's default isolation level (SERIALIZABLE), since a READ
+ * COMMITTED statement that changes data fails straight away (SQLSTATE 40001)
+ * when another connection is changing data, rather than waiting for it.
  *
  * <p>vsql's own default is SERIALIZABLE, but a SERIALIZABLE transaction that
  * changes a table makes the other connections that use the table wait for it
@@ -327,14 +329,24 @@ public final class VsqlConnection extends UnsupportedConnection {
     }
 
     /**
-     * Makes the transactions that are started after it READ ONLY, so that
-     * changing data is an error (SQLSTATE 25006). It can't be changed during a
-     * transaction.
+     * Makes the transactions that are started after it READ ONLY, including the
+     * one of each statement with auto-commit on, so that changing data is an
+     * error (SQLSTATE 25006). It can't be changed during a transaction.
      */
     @Override
     public synchronized void setReadOnly(boolean readOnly) throws SQLException {
         check();
         notInTransaction("access mode");
+
+        // The session's access mode is the one of each statement with
+        // auto-commit on (its isolation level stays vsql's default).
+        int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, dbc);
+        try {
+            Native.execDirect(stmt, "SET SESSION CHARACTERISTICS AS TRANSACTION "
+                    + (readOnly ? "READ ONLY" : "READ WRITE"));
+        } finally {
+            Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
+        }
         this.readOnly = readOnly;
     }
 

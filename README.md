@@ -108,8 +108,11 @@ Each transaction has the isolation level of `conn.setTransactionIsolation()`
 `SERIALIZABLE`. vsql's own default is `SERIALIZABLE`, but a `SERIALIZABLE`
 transaction that changes a table makes the other connections that use it wait
 for it to finish (for up to 5 seconds, then it's SQLSTATE `40001`), so the
-driver's default is `READ COMMITTED`. The isolation level and read only don't
-apply to statements that are executed with auto-commit on.
+driver's default is `READ COMMITTED`. Statements that are executed with
+auto-commit on are also `READ ONLY` if `conn.setReadOnly(true)`, but they have
+vsql's default isolation level, since a `READ COMMITTED` statement that changes
+data fails straight away (SQLSTATE `40001`) when another connection is changing
+data, rather than waiting for it.
 
 ## Positioned updates
 
