@@ -58,6 +58,10 @@
  * </tbody>
  * </table>
  *
+ * <p>{@code setObject} with a {@code java.sql.Types} code or a
+ * {@code JDBCType} (and {@code setNull}) sends the value as that type instead,
+ * see {@link io.github.elliotchance.vsql.VsqlPreparedStatement#setObject(int, Object, int)}.
+ *
  * <h2>Columns</h2>
  *
  * <table class="striped">
