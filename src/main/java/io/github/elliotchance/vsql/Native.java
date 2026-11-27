@@ -18,13 +18,8 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.SQLException;
-import java.util.HexFormat;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -37,9 +32,9 @@ import java.util.concurrent.locks.LockSupport;
  * record of the handle.
  *
  * <p>libvsql is in the jar for each OS and architecture (see
- * scripts/build-libvsql.sh), and it's copied to a file (named by its checksum)
- * in the temporary folder to be loaded. The system property vsql.library.path
- * is the path of another libvsql to use instead.
+ * scripts/build-libvsql.sh), and it's copied to a file in the temporary folder
+ * to be loaded (see LibraryFile). The system property vsql.library.path is the
+ * path of another libvsql to use instead.
  */
 // Loading and calling libvsql are restricted methods (which need
 // --enable-native-access).
@@ -328,42 +323,7 @@ final class Native {
             throw new UncheckedIOException(e);
         }
 
-        // The file is named by the library's checksum, so it's only written
-        // once (and every JVM that uses the same library loads the same file).
-        // An existing file is only used if it has the same checksum.
-        String checksum = sha256(library);
-        Path dir = Path.of(System.getProperty("java.io.tmpdir"), "vsql-" + checksum.substring(0, 16));
-        Path path = dir.resolve(file);
-        try {
-            if (Files.isRegularFile(path) && sha256(Files.readAllBytes(path)).equals(checksum)) {
-                return path;
-            }
-            Files.createDirectories(dir);
-            Path tmp = Files.createTempFile(dir, "libvsql", ".tmp");
-            Files.write(tmp, library);
-            try {
-                Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (IOException e) {
-                // Another JVM wrote it first (and on Windows, it can't be
-                // replaced while it's loaded).
-                Files.deleteIfExists(tmp);
-                if (!Files.isRegularFile(path) || !sha256(Files.readAllBytes(path)).equals(checksum)) {
-                    throw e;
-                }
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException("vsql: can't write libvsql to " + path, e);
-        }
-
-        return path;
-    }
-
-    private static String sha256(byte[] data) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(data));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return LibraryFile.extract(Path.of(System.getProperty("java.io.tmpdir")), file, library);
     }
 
     /** Throws the error for a return code (SQL_NO_DATA isn't one). */
