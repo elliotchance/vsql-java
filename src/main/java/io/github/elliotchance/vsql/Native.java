@@ -56,6 +56,7 @@ final class Native {
     static final short SQL_HANDLE_ENV = 1;
     static final short SQL_HANDLE_DBC = 2;
     static final short SQL_HANDLE_STMT = 3;
+    static final short SQL_HANDLE_DESC = 4;
 
     static final short SQL_CHAR = 1;
     static final short SQL_NUMERIC = 2;
@@ -73,21 +74,64 @@ final class Native {
     static final short SQL_TYPE_TIMESTAMP = 93;
     static final short SQL_TYPE_TIME_WITH_TIMEZONE = 94;
     static final short SQL_TYPE_TIMESTAMP_WITH_TIMEZONE = 95;
+    static final short SQL_DECFLOAT = 26;
+    static final short SQL_BLOB = 30;
+    static final short SQL_CLOB = 40;
+    static final short SQL_BINARY = 60;
+    static final short SQL_VARBINARY = 61;
+
+    // The SQL_DESC_TYPE of a datetime or interval (its concise code is 90 or
+    // 100 plus its SQL_DESC_DATETIME_INTERVAL_CODE).
+    static final short SQL_DATETIME = 9;
+    static final short SQL_INTERVAL = 10;
+    static final short SQL_INTERVAL_YEAR = 101;
+    static final short SQL_INTERVAL_MONTH = 102;
+    static final short SQL_INTERVAL_DAY = 103;
+    static final short SQL_INTERVAL_HOUR = 104;
+    static final short SQL_INTERVAL_MINUTE = 105;
+    static final short SQL_INTERVAL_SECOND = 106;
+    static final short SQL_INTERVAL_YEAR_TO_MONTH = 107;
+    static final short SQL_INTERVAL_DAY_TO_HOUR = 108;
+    static final short SQL_INTERVAL_DAY_TO_MINUTE = 109;
+    static final short SQL_INTERVAL_DAY_TO_SECOND = 110;
+    static final short SQL_INTERVAL_HOUR_TO_MINUTE = 111;
+    static final short SQL_INTERVAL_HOUR_TO_SECOND = 112;
+    static final short SQL_INTERVAL_MINUTE_TO_SECOND = 113;
+    static final short SQL_ALL_TYPES = 0;
 
     static final int SQL_ATTR_AUTOCOMMIT = 102;
     static final int SQL_AUTOCOMMIT_OFF = 0;
     static final int SQL_AUTOCOMMIT_ON = 1;
     static final short SQL_COMMIT = 0;
     static final short SQL_ROLLBACK = 1;
+    static final short SQL_SAVEPOINT_NAME_ROLLBACK = 2;
+    static final short SQL_SAVEPOINT_NAME_RELEASE = 4;
+    static final int SQL_ATTR_SAVEPOINT_NAME = 10027;
 
     static final int SQL_TRANSACTION_READ_ONLY = 1;
     static final int SQL_TRANSACTION_READ_WRITE = 2;
     static final int SQL_TRANSACTION_READ_UNCOMMITTED = 1;
     static final int SQL_TRANSACTION_READ_COMMITTED = 2;
+    static final int SQL_TRANSACTION_REPEATABLE_READ = 4;
+    static final int SQL_TRANSACTION_SERIALIZABLE = 8;
 
     static final short SQL_PARAM_MODE_IN = 1;
     static final short SQL_RESET_PARAMS = 3;
     static final short SQL_NO_NULLS = 0;
+
+    static final short SQL_DIAG_MORE = 13;
+    static final short SQL_DIAG_CONSTRAINT_CATALOG = 15;
+    static final short SQL_DIAG_CURSOR_NAME = 22;
+
+    static final int SQL_ATTR_IMP_PARAM_DESC = 10013;
+    static final short SQL_DESC_COUNT = 1001;
+    static final short SQL_DESC_LENGTH = 1003;
+    static final short SQL_DESC_DATETIME_INTERVAL_PRECISION = 26;
+
+    static final short SQL_DBMS_VERSION = 18;
+    static final short SQL_VSQL_BUILD_VERSION = 11000;
+    static final short SQL_VSQL_FILE_READ_VERSION = 11008;
+    static final short SQL_VSQL_FILE_WRITE_VERSION = 11009;
 
     private static final MethodHandle ALLOC_HANDLE;
     private static final MethodHandle FREE_HANDLE;
@@ -108,6 +152,12 @@ final class Native {
     private static final MethodHandle CLOSE_CURSOR;
     private static final MethodHandle FREE_STMT;
     private static final MethodHandle GET_DIAG_REC;
+    private static final MethodHandle GET_DIAG_FIELD;
+    private static final MethodHandle GET_INFO;
+    private static final MethodHandle GET_STMT_ATTR;
+    private static final MethodHandle GET_DESC_FIELD;
+    private static final MethodHandle GET_DESC_REC;
+    private static final MethodHandle GET_TYPE_INFO;
 
     // libvsql reads the value of SQL_ATTR_AUTOCOMMIT after SQLSetConnectAttr
     // returns, so it's never freed.
@@ -143,6 +193,15 @@ final class Native {
         FREE_STMT = handle(linker, lib, "SQLFreeStmt", JAVA_INT, JAVA_SHORT);
         GET_DIAG_REC = handle(linker, lib, "SQLGetDiagRec", JAVA_SHORT, JAVA_INT, JAVA_SHORT,
                 ADDRESS, ADDRESS, ADDRESS, JAVA_SHORT, ADDRESS);
+        GET_DIAG_FIELD = handle(linker, lib, "SQLGetDiagField", JAVA_SHORT, JAVA_INT, JAVA_SHORT,
+                JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS);
+        GET_INFO = handle(linker, lib, "SQLGetInfo", JAVA_INT, JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS);
+        GET_STMT_ATTR = handle(linker, lib, "SQLGetStmtAttr", JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS);
+        GET_DESC_FIELD = handle(linker, lib, "SQLGetDescField", JAVA_INT, JAVA_SHORT, JAVA_SHORT,
+                ADDRESS, JAVA_INT, ADDRESS);
+        GET_DESC_REC = handle(linker, lib, "SQLGetDescRec", JAVA_INT, JAVA_SHORT, ADDRESS, JAVA_SHORT,
+                ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS);
+        GET_TYPE_INFO = handle(linker, lib, "SQLGetTypeInfo", JAVA_INT, JAVA_SHORT);
 
         // libvsql initializes itself (and its garbage collector) in the first
         // routine that's called, if it wasn't when it was loaded (see load).
@@ -314,18 +373,50 @@ final class Native {
         }
     }
 
-    /** The first diagnostic record of the last routine called with a handle. */
+    /**
+     * The diagnostic records of the last routine called with a handle, as an
+     * SQLException for the first record, with the rest chained to it (see
+     * SQLException.getNextException).
+     */
     private static SQLException diagnostics(short handleType, int handle) {
+        boolean more = false;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment n = arena.allocate(JAVA_INT);
+            short rc = (short) GET_DIAG_FIELD.invokeExact(handleType, handle, (short) 0, SQL_DIAG_MORE, n,
+                    (short) 0, MemorySegment.NULL);
+            more = rc == SQL_SUCCESS && n.get(JAVA_INT, 0) != 0;
+        } catch (Throwable t) {
+            // It's only a hint.
+        }
+
+        SQLException first = null;
+        for (short record = 1; ; record++) {
+            SQLException e = diagnostic(handleType, handle, record, more);
+            if (e == null) {
+                break;
+            }
+            if (first == null) {
+                first = e;
+            } else {
+                first.setNextException(e);
+            }
+        }
+
+        return first == null ? Errors.sql("HY000", "unknown error") : first;
+    }
+
+    /** A diagnostic record, or null if there isn't one. */
+    private static SQLException diagnostic(short handleType, int handle, short record, boolean more) {
         int size = 512;
         while (true) {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment sqlstate = arena.allocate(6);
                 MemorySegment message = arena.allocate(size);
                 MemorySegment length = arena.allocate(JAVA_SHORT);
-                short rc = (short) GET_DIAG_REC.invokeExact(handleType, handle, (short) 1, sqlstate,
+                short rc = (short) GET_DIAG_REC.invokeExact(handleType, handle, record, sqlstate,
                         MemorySegment.NULL, message, (short) size, length);
                 if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) {
-                    return Errors.sql("HY000", "unknown error");
+                    return null;
                 }
 
                 // The message was truncated.
@@ -335,9 +426,39 @@ final class Native {
                     continue;
                 }
 
-                return Errors.sql(string(sqlstate, 5), string(message, n));
+                // SQL_DIAG_CONSTRAINT_CATALOG to SQL_DIAG_CURSOR_NAME.
+                String[] names = new String[SQL_DIAG_CURSOR_NAME - SQL_DIAG_CONSTRAINT_CATALOG + 1];
+                for (int i = 0; i < names.length; i++) {
+                    names[i] = diagString(handleType, handle, record, (short) (SQL_DIAG_CONSTRAINT_CATALOG + i));
+                }
+                VsqlDiagnostics d = new VsqlDiagnostics(names[0], names[1], names[2], names[3], names[4],
+                        names[5], names[6], names[7], more);
+
+                return Errors.sql(string(sqlstate, 5), string(message, n), d);
             } catch (Throwable t) {
                 return Errors.sql("HY000", "can't read the error: " + t);
+            }
+        }
+    }
+
+    /** A string field of a diagnostic record, or null if it's empty. */
+    private static String diagString(short handleType, int handle, short record, short field) throws Throwable {
+        int size = 129;
+        while (true) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment value = arena.allocate(size);
+                MemorySegment length = arena.allocate(JAVA_SHORT);
+                short rc = (short) GET_DIAG_FIELD.invokeExact(handleType, handle, record, field, value,
+                        (short) size, length);
+                if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) {
+                    return null;
+                }
+                int n = length.get(JAVA_SHORT, 0);
+                if (n >= size) {
+                    size = n + 1;
+                    continue;
+                }
+                return n == 0 ? null : string(value, n);
             }
         }
     }
@@ -457,6 +578,118 @@ final class Native {
         }
     }
 
+    /**
+     * Rolls back to (SQL_SAVEPOINT_NAME_ROLLBACK) or releases
+     * (SQL_SAVEPOINT_NAME_RELEASE) a savepoint, which is named by
+     * SQL_ATTR_SAVEPOINT_NAME.
+     */
+    static void endSavepoint(int dbc, String name, short completion) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            check((short) SET_CONNECT_ATTR.invokeExact(dbc, SQL_ATTR_SAVEPOINT_NAME, utf8(arena, name),
+                    utf8Length(name)), SQL_HANDLE_DBC, dbc);
+            check((short) END_TRAN.invokeExact(SQL_HANDLE_DBC, dbc, completion), SQL_HANDLE_DBC, dbc);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /** A string from SQLGetInfo. */
+    static String getInfoString(int dbc, short infoType) throws SQLException {
+        int size = 129;
+        while (true) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment value = arena.allocate(size);
+                MemorySegment length = arena.allocate(JAVA_SHORT);
+                check((short) GET_INFO.invokeExact(dbc, infoType, value, (short) size, length), SQL_HANDLE_DBC, dbc);
+                int n = length.get(JAVA_SHORT, 0);
+                if (n >= size) {
+                    size = n + 1;
+                    continue;
+                }
+                return string(value, n);
+            } catch (SQLException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unexpected(t);
+            }
+        }
+    }
+
+    /** An SQLSMALLINT from SQLGetInfo. */
+    static short getInfoShort(int dbc, short infoType) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment value = arena.allocate(JAVA_SHORT);
+            check((short) GET_INFO.invokeExact(dbc, infoType, value, (short) 0, MemorySegment.NULL),
+                    SQL_HANDLE_DBC, dbc);
+            return value.get(JAVA_SHORT, 0);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * Describes the dynamic parameters of a prepared statement, from its IPD.
+     * The type of a datetime or interval is its concise code (such as
+     * SQL_TYPE_DATE or SQL_INTERVAL_DAY), like SQLDescribeCol.
+     */
+    static Column[] describeParams(int stmt) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment desc = arena.allocate(JAVA_INT);
+            check((short) GET_STMT_ATTR.invokeExact(stmt, SQL_ATTR_IMP_PARAM_DESC, desc, 0, MemorySegment.NULL),
+                    SQL_HANDLE_STMT, stmt);
+            int ipd = desc.get(JAVA_INT, 0);
+            MemorySegment count = arena.allocate(JAVA_SHORT);
+            check((short) GET_DESC_FIELD.invokeExact(ipd, (short) 0, SQL_DESC_COUNT, count, 0, MemorySegment.NULL),
+                    SQL_HANDLE_DESC, ipd);
+
+            Column[] params = new Column[count.get(JAVA_SHORT, 0)];
+            MemorySegment type = arena.allocate(JAVA_SHORT);
+            MemorySegment subType = arena.allocate(JAVA_SHORT);
+            MemorySegment octetLength = arena.allocate(JAVA_INT);
+            MemorySegment precision = arena.allocate(JAVA_SHORT);
+            MemorySegment scale = arena.allocate(JAVA_SHORT);
+            MemorySegment nullable = arena.allocate(JAVA_SHORT);
+            MemorySegment length = arena.allocate(JAVA_INT);
+            for (short i = 1; i <= params.length; i++) {
+                check((short) GET_DESC_REC.invokeExact(ipd, i, MemorySegment.NULL, (short) 0, MemorySegment.NULL,
+                        type, subType, octetLength, precision, scale, nullable), SQL_HANDLE_DESC, ipd);
+                check((short) GET_DESC_FIELD.invokeExact(ipd, i, SQL_DESC_LENGTH, length, 0, MemorySegment.NULL),
+                        SQL_HANDLE_DESC, ipd);
+                short t = type.get(JAVA_SHORT, 0);
+                short concise = switch (t) {
+                    case SQL_DATETIME -> (short) (90 + subType.get(JAVA_SHORT, 0));
+                    case SQL_INTERVAL -> (short) (100 + subType.get(JAVA_SHORT, 0));
+                    default -> t;
+                };
+                params[i - 1] = Column.ofDescriptor(concise, octetLength.get(JAVA_INT, 0), length.get(JAVA_INT, 0),
+                        precision.get(JAVA_SHORT, 0), scale.get(JAVA_SHORT, 0), nullable.get(JAVA_SHORT, 0) != SQL_NO_NULLS);
+            }
+            return params;
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * Opens a cursor on stmt with SQLGetTypeInfo for every data type, see
+     * VsqlDatabaseMetaData.getTypeInfo.
+     */
+    static void getTypeInfo(int stmt) throws SQLException {
+        try {
+            check((short) GET_TYPE_INFO.invokeExact(stmt, SQL_ALL_TYPES), SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
     static void execDirect(int stmt, String sql) throws SQLException {
         try (Arena arena = Arena.ofConfined()) {
             check((short) EXEC_DIRECT.invokeExact(stmt, utf8(arena, sql), utf8Length(sql)),
@@ -513,6 +746,13 @@ final class Native {
                             // A length must be greater than zero, an empty
                             // string is given null terminated.
                             ind.set(JAVA_INT, 0, bytes.length == 0 ? SQL_NTS : bytes.length);
+                        }
+                        case byte[] b -> {
+                            // A binary string can be empty (unlike a
+                            // character string).
+                            value = arena.allocateFrom(JAVA_BYTE, b.length == 0 ? new byte[1] : b);
+                            bufferLength = b.length;
+                            ind.set(JAVA_INT, 0, b.length);
                         }
                         default -> throw new IllegalArgumentException("vsql: parameter " + p.value());
                     }
@@ -600,8 +840,8 @@ final class Native {
 
     /**
      * Fetches the next row, it's null after the last row. Each column is read
-     * as its kind (see Column.kind): a Long, Double, Float or String, or null
-     * for a NULL.
+     * as its kind (see Column.kind): a Long, Double, Float, String or byte[],
+     * or null for a NULL.
      */
     static Object[] fetchRow(int stmt, Column[] columns) throws SQLException {
         try (Arena arena = Arena.ofConfined()) {
@@ -630,6 +870,7 @@ final class Native {
                         row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_FLOAT, 0);
                     }
                     case TEXT -> row[i] = getString(arena, stmt, n, ind);
+                    case BINARY -> row[i] = getBytes(arena, stmt, n, ind);
                 }
             }
 
@@ -677,6 +918,43 @@ final class Native {
             }
             s.write(last);
             return s.toString(StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * Reads a column as SQL_BINARY, it's null for a NULL. A value that doesn't
+     * fit in the buffer is read in pieces (like getString, but there's no null
+     * terminator).
+     */
+    private static byte[] getBytes(Arena arena, int stmt, short n, MemorySegment ind) throws Throwable {
+        int size = 256;
+        MemorySegment buf = arena.allocate(size);
+        java.io.ByteArrayOutputStream b = null;
+        while (true) {
+            short rc = (short) GET_DATA.invokeExact(stmt, n, SQL_BINARY, buf, size, ind);
+            check(rc, SQL_HANDLE_STMT, stmt);
+            int length = ind.get(JAVA_INT, 0);
+            if (length == SQL_NULL_DATA) {
+                return null;
+            }
+
+            // The rest of the value (length) didn't fit, so the buffer is full.
+            if (rc == SQL_SUCCESS_WITH_INFO && length > size) {
+                if (b == null) {
+                    b = new java.io.ByteArrayOutputStream(length);
+                }
+                b.write(buf.asSlice(0, size).toArray(JAVA_BYTE));
+                size = length - size;
+                buf = arena.allocate(size);
+                continue;
+            }
+
+            byte[] last = buf.asSlice(0, Math.min(length, size)).toArray(JAVA_BYTE);
+            if (b == null) {
+                return last;
+            }
+            b.write(last);
+            return b.toByteArray();
         }
     }
 }

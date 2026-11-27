@@ -11,7 +11,8 @@ import java.sql.SQLTransactionRollbackException;
 
 /**
  * Errors makes the SQLException for an SQLSTATE: the JDBC subclass for its
- * class (the first two characters), with the SQLSTATE as getSQLState.
+ * class (the first two characters), with the SQLSTATE as getSQLState. An error
+ * from libvsql also implements VsqlException, with its diagnostics.
  */
 final class Errors {
     private Errors() {
@@ -36,6 +37,25 @@ final class Errors {
         };
     }
 
+    /** An error from libvsql, with its diagnostics. */
+    static SQLException sql(String sqlstate, String message, VsqlDiagnostics d) {
+        String cls = sqlstate.length() >= 2 ? sqlstate.substring(0, 2) : sqlstate;
+        if (sqlstate.equals("HYC00")) {
+            return new FeatureNotSupported(message, sqlstate, d);
+        }
+
+        return switch (cls) {
+            case "08" -> new NonTransientConnection(message, sqlstate, d);
+            case "0A" -> new FeatureNotSupported(message, sqlstate, d);
+            case "22" -> new Data(message, sqlstate, d);
+            case "23" -> new IntegrityConstraintViolation(message, sqlstate, d);
+            case "28" -> new InvalidAuthorizationSpec(message, sqlstate, d);
+            case "40" -> new TransactionRollback(message, sqlstate, d);
+            case "42" -> new SyntaxError(message, sqlstate, d);
+            default -> new Other(message, sqlstate, d);
+        };
+    }
+
     static SQLFeatureNotSupportedException unsupported(String what) {
         return new SQLFeatureNotSupportedException("vsql: " + what + " is not supported", "0A000");
     }
@@ -46,5 +66,130 @@ final class Errors {
         }
 
         return new SQLException("vsql: the " + what + " is closed", "HY010");
+    }
+
+    // The JDBC subclasses that implement VsqlException.
+
+    private static final class Other extends SQLException implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        Other(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
+
+    private static final class NonTransientConnection extends SQLNonTransientConnectionException
+            implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        NonTransientConnection(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
+
+    private static final class FeatureNotSupported extends SQLFeatureNotSupportedException implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        FeatureNotSupported(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
+
+    private static final class Data extends SQLDataException implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        Data(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
+
+    private static final class IntegrityConstraintViolation extends SQLIntegrityConstraintViolationException
+            implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        IntegrityConstraintViolation(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
+
+    private static final class InvalidAuthorizationSpec extends SQLInvalidAuthorizationSpecException
+            implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        InvalidAuthorizationSpec(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
+
+    private static final class TransactionRollback extends SQLTransactionRollbackException implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        TransactionRollback(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
+
+    private static final class SyntaxError extends SQLSyntaxErrorException implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        SyntaxError(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
     }
 }

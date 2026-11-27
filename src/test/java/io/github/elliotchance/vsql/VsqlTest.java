@@ -19,7 +19,11 @@ import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ParameterMetaData;
 import java.sql.ResultSetMetaData;
+import java.sql.Savepoint;
+import java.sql.Blob;
+import java.sql.Clob;
 import java.sql.SQLDataException;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
@@ -28,12 +32,14 @@ import java.sql.SQLSyntaxErrorException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
+import java.time.Period;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -110,6 +116,21 @@ class VsqlTest {
                 Arguments.of("TIMESTAMP '2022-01-02 15:04:05.123+05:30'",
                         OffsetDateTime.of(2022, 1, 2, 15, 4, 5, 123_000_000, PLUS_0530),
                         Types.TIMESTAMP_WITH_TIMEZONE, "TIMESTAMP WITH TIME ZONE"),
+                Arguments.of("CAST(1.5 AS DECFLOAT)", new BigDecimal("1.5"), Types.DECIMAL, "DECFLOAT"),
+                Arguments.of("CAST('1E+400' AS DECFLOAT(34))", new BigDecimal("1E+400"), Types.DECIMAL, "DECFLOAT"),
+                Arguments.of("INTERVAL '1-2' YEAR TO MONTH", Period.of(1, 2, 0), Types.OTHER,
+                        "INTERVAL YEAR TO MONTH"),
+                Arguments.of("INTERVAL '-14' MONTH", Period.ofMonths(-14), Types.OTHER, "INTERVAL MONTH"),
+                Arguments.of("INTERVAL '100' YEAR(3)", Period.ofYears(100), Types.OTHER, "INTERVAL YEAR"),
+                Arguments.of("INTERVAL '-3 04:05:06.5' DAY TO SECOND",
+                        Duration.parse("-P3DT4H5M6.5S"), Types.OTHER, "INTERVAL DAY TO SECOND"),
+                Arguments.of("INTERVAL '26:03' HOUR TO MINUTE", Duration.parse("PT26H3M"), Types.OTHER,
+                        "INTERVAL HOUR TO MINUTE"),
+                Arguments.of("INTERVAL '1 02' DAY TO HOUR", Duration.parse("PT26H"), Types.OTHER,
+                        "INTERVAL DAY TO HOUR"),
+                Arguments.of("INTERVAL '3:04.000001' MINUTE TO SECOND", Duration.parse("PT3M4.000001S"),
+                        Types.OTHER, "INTERVAL MINUTE TO SECOND"),
+                Arguments.of("INTERVAL '1.5' SECOND", Duration.ofMillis(1500), Types.OTHER, "INTERVAL SECOND"),
                 Arguments.of("CAST(NULL AS INTEGER)", null, Types.INTEGER, "INTEGER"),
                 Arguments.of("CAST(NULL AS BOOLEAN)", null, Types.BOOLEAN, "BOOLEAN"),
                 Arguments.of("CAST(NULL AS DATE)", null, Types.DATE, "DATE"));
@@ -231,7 +252,8 @@ class VsqlTest {
         assertEquals(1, db.getDatabaseMajorVersion());
         assertEquals("jdbc:vsql::memory:", db.getURL());
         assertTrue(db.supportsTransactionIsolationLevel(Connection.TRANSACTION_READ_COMMITTED));
-        assertFalse(db.supportsTransactionIsolationLevel(Connection.TRANSACTION_SERIALIZABLE));
+        assertTrue(db.supportsTransactionIsolationLevel(Connection.TRANSACTION_SERIALIZABLE));
+        assertFalse(db.supportsTransactionIsolationLevel(Connection.TRANSACTION_NONE));
         assertThrows(SQLFeatureNotSupportedException.class, () -> db.getTables(null, null, null, null));
     }
 
@@ -316,7 +338,6 @@ class VsqlTest {
             assertEquals("07002", assertThrows(SQLException.class, s::executeQuery).getSQLState());
             s.clearParameters();
 
-            assertThrows(SQLFeatureNotSupportedException.class, () -> s.setObject(1, new byte[] {1}));
             assertEquals("07006",
                     assertThrows(SQLException.class, () -> s.setObject(1, new Object())).getSQLState());
             assertEquals("07009", assertThrows(SQLException.class, () -> s.setInt(0, 1)).getSQLState());
@@ -544,22 +565,56 @@ class VsqlTest {
 
     @Test
     void isolationLevels() throws SQLException {
+        exec("CREATE TABLE foo (x INTEGER)");
         assertEquals(Connection.TRANSACTION_READ_COMMITTED, conn.getTransactionIsolation());
-        conn.setTransactionIsolation(Connection.TRANSACTION_READ_UNCOMMITTED);
+        assertEquals(Connection.TRANSACTION_READ_COMMITTED, conn.getMetaData().getDefaultTransactionIsolation());
         conn.setAutoCommit(false);
-        assertEquals(1, scalar(conn, "VALUES 1"));
-        conn.rollback();
-        conn.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-        for (int level : new int[] {Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE}) {
-            SQLException e = assertThrows(SQLFeatureNotSupportedException.class,
-                    () -> conn.setTransactionIsolation(level));
-            assertEquals("HYC00", e.getSQLState());
-        }
 
-        // Read only is a hint.
+        // A READ UNCOMMITTED transaction is READ ONLY.
+        conn.setTransactionIsolation(Connection.TRANSACTION_READ_UNCOMMITTED);
+        assertEquals(1, scalar(conn, "VALUES 1"));
+        assertEquals("25006",
+                assertThrows(SQLException.class, () -> exec("INSERT INTO foo (x) VALUES (1)")).getSQLState());
+        conn.rollback();
+
+        for (int level : new int[] {Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ,
+                Connection.TRANSACTION_SERIALIZABLE}) {
+            conn.setTransactionIsolation(level);
+            assertEquals(level, conn.getTransactionIsolation());
+            exec("INSERT INTO foo (x) VALUES (1)");
+            conn.commit();
+        }
+        assertEquals(3, scalar(conn, "SELECT COUNT(*) FROM foo"));
+        conn.commit();
+
+        // It can't be changed during a transaction.
+        exec("INSERT INTO foo (x) VALUES (1)");
+        assertEquals("25001", assertThrows(SQLException.class,
+                () -> conn.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED)).getSQLState());
+        conn.rollback();
+        assertEquals("HY024", assertThrows(SQLException.class, () -> conn.setTransactionIsolation(3)).getSQLState());
+    }
+
+    @Test
+    void readOnly() throws SQLException {
+        exec("CREATE TABLE foo (x INTEGER)");
         conn.setReadOnly(true);
         assertTrue(conn.isReadOnly());
-        assertEquals(1, scalar(conn, "VALUES 1"));
+
+        // It doesn't apply with auto-commit on.
+        exec("INSERT INTO foo (x) VALUES (1)");
+
+        conn.setAutoCommit(false);
+        assertEquals(1, scalar(conn, "SELECT COUNT(*) FROM foo"));
+        SQLException e = assertThrows(SQLException.class, () -> exec("INSERT INTO foo (x) VALUES (2)"));
+        assertEquals("25006", e.getSQLState());
+        assertEquals("25001", assertThrows(SQLException.class, () -> conn.setReadOnly(false)).getSQLState());
+        conn.rollback();
+
+        conn.setReadOnly(false);
+        exec("INSERT INTO foo (x) VALUES (2)");
+        conn.commit();
+        assertEquals(2, scalar(conn, "SELECT COUNT(*) FROM foo"));
     }
 
     @Test
@@ -674,5 +729,413 @@ class VsqlTest {
         }
         assertEquals(List.of(), errors);
         assertEquals(100, scalar(conn, "SELECT COUNT(*) FROM foo"));
+    }
+
+    @Test
+    void binaryStrings() throws Exception {
+        exec("CREATE TABLE foo (n INTEGER, b BINARY(3), v VARBINARY(10), l BLOB(100000))");
+        byte[] big = new byte[70_000];
+        for (int i = 0; i < big.length; i++) {
+            big[i] = (byte) (i * 7);
+        }
+        try (PreparedStatement s = conn.prepareStatement("INSERT INTO foo (n, b, v, l) VALUES (?, ?, ?, ?)")) {
+            s.setInt(1, 1);
+            s.setBytes(2, new byte[] {1, 2});
+            s.setBytes(3, new byte[] {(byte) 0xff, 0, 1});
+            Blob blob = conn.createBlob();
+            blob.setBytes(1, big);
+            s.setBlob(4, blob);
+            s.executeUpdate();
+
+            // Empty, NULL and streams.
+            s.setInt(1, 2);
+            s.setObject(2, new byte[0]);
+            s.setBinaryStream(3, new java.io.ByteArrayInputStream(new byte[0]));
+            s.setNull(4, Types.BLOB);
+            s.executeUpdate();
+
+            s.setInt(1, 3);
+            s.setBytes(2, null);
+            s.setBinaryStream(3, new java.io.ByteArrayInputStream(new byte[] {5, 6, 7, 8}), 2);
+            s.setBlob(4, new java.io.ByteArrayInputStream(new byte[] {9}));
+            s.executeUpdate();
+        }
+
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("SELECT b, v, l FROM foo ORDER BY n")) {
+            ResultSetMetaData md = rs.getMetaData();
+            assertEquals(Types.BINARY, md.getColumnType(1));
+            assertEquals("BINARY", md.getColumnTypeName(1));
+            assertEquals(3, md.getPrecision(1));
+            assertEquals(Types.VARBINARY, md.getColumnType(2));
+            assertEquals("BINARY VARYING", md.getColumnTypeName(2));
+            assertEquals("[B", md.getColumnClassName(2));
+            assertEquals(Types.BLOB, md.getColumnType(3));
+            assertEquals("BINARY LARGE OBJECT", md.getColumnTypeName(3));
+            assertEquals(Blob.class.getName(), md.getColumnClassName(3));
+
+            assertTrue(rs.next());
+            // BINARY is padded with zeros.
+            assertArrayEquals(new byte[] {1, 2, 0}, rs.getBytes(1));
+            assertArrayEquals(new byte[] {(byte) 0xff, 0, 1}, (byte[]) rs.getObject(2));
+            assertEquals("FF0001", rs.getString(2));
+            assertArrayEquals(new byte[] {(byte) 0xff, 0, 1}, rs.getBinaryStream("V").readAllBytes());
+            assertArrayEquals(big, rs.getBytes(3));
+            Blob blob = (Blob) rs.getObject(3);
+            assertEquals(big.length, blob.length());
+            assertArrayEquals(new byte[] {7, 14}, blob.getBytes(2, 2));
+            assertEquals(2, blob.position(new byte[] {7, 14}, 1));
+            assertArrayEquals(big, rs.getObject(3, byte[].class));
+
+            assertTrue(rs.next());
+            assertArrayEquals(new byte[] {0, 0, 0}, rs.getBytes(1));
+            assertArrayEquals(new byte[0], rs.getBytes(2));
+            assertNull(rs.getBytes(3));
+            assertTrue(rs.wasNull());
+            assertNull(rs.getBlob(3));
+
+            assertTrue(rs.next());
+            assertNull(rs.getObject(1));
+            assertArrayEquals(new byte[] {5, 6}, rs.getBytes(2));
+            assertArrayEquals(new byte[] {9}, rs.getBlob(3).getBytes(1, 10));
+            assertFalse(rs.next());
+        }
+
+        // Only binary strings can be read as bytes.
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("VALUES 'a'")) {
+            rs.next();
+            assertEquals("22018", assertThrows(SQLException.class, () -> rs.getBytes(1)).getSQLState());
+        }
+    }
+
+    @Test
+    void blobs() throws SQLException {
+        Blob b = conn.createBlob();
+        assertEquals(0, b.length());
+        assertEquals(3, b.setBytes(1, new byte[] {1, 2, 3}));
+        assertEquals(2, b.setBytes(3, new byte[] {9, 9, 9}, 1, 2));
+        assertArrayEquals(new byte[] {1, 2, 9, 9}, b.getBytes(1, 10));
+        b.truncate(1);
+        assertArrayEquals(new byte[] {1}, b.getBytes(1, 10));
+        assertEquals(-1, b.position(new byte[] {2}, 1));
+        assertEquals("22011", assertThrows(SQLException.class, () -> b.getBytes(3, 1)).getSQLState());
+        b.free();
+        assertThrows(SQLException.class, b::length);
+    }
+
+    @Test
+    void clobs() throws Exception {
+        exec("CREATE TABLE foo (n INTEGER, c CLOB(10000))");
+        String big = "é".repeat(500) + "x";
+        try (PreparedStatement s = conn.prepareStatement("INSERT INTO foo (n, c) VALUES (?, ?)")) {
+            Clob clob = conn.createClob();
+            clob.setString(1, "hello world");
+            clob.setString(7, "there");
+            s.setInt(1, 1);
+            s.setClob(2, clob);
+            s.executeUpdate();
+
+            s.setInt(1, 2);
+            s.setCharacterStream(2, new java.io.StringReader(big));
+            s.executeUpdate();
+
+            s.setInt(1, 3);
+            s.setClob(2, new java.io.StringReader(""));
+            s.executeUpdate();
+
+            s.setInt(1, 4);
+            s.setClob(2, (java.io.Reader) null);
+            s.executeUpdate();
+
+            s.setInt(1, 5);
+            s.setString(2, "a string");
+            s.executeUpdate();
+        }
+
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("SELECT c FROM foo ORDER BY n")) {
+            ResultSetMetaData md = rs.getMetaData();
+            assertEquals(Types.CLOB, md.getColumnType(1));
+            assertEquals("CHARACTER LARGE OBJECT", md.getColumnTypeName(1));
+            assertEquals(Clob.class.getName(), md.getColumnClassName(1));
+            assertEquals(10000, md.getPrecision(1));
+
+            assertTrue(rs.next());
+            assertEquals("hello there", rs.getString(1));
+            Clob clob = (Clob) rs.getObject(1);
+            assertEquals(11, clob.length());
+            assertEquals("there", clob.getSubString(7, 100));
+            assertEquals(7, clob.position("there", 1));
+
+            assertTrue(rs.next());
+            assertEquals(big, rs.getClob(1).getSubString(1, 1000));
+            assertEquals(big, new java.io.BufferedReader(rs.getCharacterStream(1)).readLine());
+
+            assertTrue(rs.next());
+            assertEquals("", rs.getString(1));
+            assertTrue(rs.next());
+            assertNull(rs.getClob(1));
+            assertTrue(rs.next());
+            assertEquals("a string", rs.getObject(1, Clob.class).getSubString(1, 100));
+        }
+    }
+
+    @Test
+    void decfloat() throws SQLException {
+        exec("CREATE TABLE foo (d DECFLOAT)");
+        try (PreparedStatement s = conn.prepareStatement("INSERT INTO foo (d) VALUES (?)")) {
+            for (Object v : new Object[] {new BigDecimal("1.25"), new BigDecimal("-1E+300"), 7}) {
+                s.setObject(1, v);
+                s.executeUpdate();
+            }
+        }
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("SELECT d FROM foo")) {
+            assertEquals(Types.DECIMAL, rs.getMetaData().getColumnType(1));
+            assertEquals(34, rs.getMetaData().getPrecision(1));
+            assertTrue(rs.getMetaData().isSigned(1));
+            assertTrue(rs.next());
+            assertEquals(new BigDecimal("1.25"), rs.getObject(1));
+            assertEquals(1.25, rs.getDouble(1));
+            assertTrue(rs.next());
+            assertEquals(0, new BigDecimal("-1E+300").compareTo(rs.getBigDecimal(1)));
+            assertTrue(rs.next());
+            assertEquals(7, rs.getInt(1));
+        }
+    }
+
+    @Test
+    void intervalParameters() throws SQLException {
+        exec("""
+                CREATE TABLE foo (
+                    ym INTERVAL YEAR(8) TO MONTH, m INTERVAL MONTH(4), ds INTERVAL DAY(8) TO SECOND(6),
+                    hm INTERVAL HOUR(4) TO MINUTE, s INTERVAL SECOND(4, 6))""");
+        record Case(String column, Object param, Object want, String string) {
+        }
+        for (Case c : List.of(
+                new Case("ym", Period.of(1, 2, 0), Period.of(1, 2, 0), "1-02"),
+                new Case("ym", Period.ofMonths(-14), Period.of(-1, -2, 0), "-1-02"),
+                new Case("ym", Period.ofYears(99_999_999), Period.ofYears(99_999_999), "99999999-00"),
+                new Case("m", Period.of(1, 2, 0), Period.ofMonths(14), "14"),
+                new Case("ds", Duration.parse("P3DT4H5M6.5S"), Duration.parse("P3DT4H5M6.5S"),
+                        "3 04:05:06.500000"),
+                new Case("ds", Duration.ofNanos(-1_000), Duration.ofNanos(-1_000), "-0 00:00:00.000001"),
+                new Case("hm", Duration.parse("P1DT2H3M"), Duration.parse("PT26H3M"), "26:03"),
+                new Case("s", Duration.ofMillis(1500), Duration.ofMillis(1500), "1.500000"),
+                // A string is cast to the interval.
+                new Case("ym", "3-4", Period.of(3, 4, 0), "3-04"))) {
+            exec("DELETE FROM foo");
+            try (PreparedStatement s = conn.prepareStatement("INSERT INTO foo (" + c.column() + ") VALUES (?)")) {
+                s.setObject(1, c.param());
+                assertEquals(1, s.executeUpdate(), c.toString());
+            }
+            try (Statement s = conn.createStatement();
+                    ResultSet rs = s.executeQuery("SELECT " + c.column() + " FROM foo")) {
+                assertTrue(rs.next());
+                assertEquals(c.want(), rs.getObject(1), c.toString());
+                assertEquals(c.want(), rs.getObject(1, c.want().getClass()), c.toString());
+                assertEquals(c.string(), rs.getString(1), c.toString());
+            }
+        }
+
+        // A Period with days isn't an interval.
+        try (PreparedStatement s = conn.prepareStatement("VALUES CAST(? AS INTERVAL YEAR TO MONTH)")) {
+            assertEquals("22015", assertThrows(SQLException.class, () -> s.setObject(1, Period.ofDays(1)))
+                    .getSQLState());
+        }
+        try (Statement s = conn.createStatement();
+                ResultSet rs = s.executeQuery("VALUES INTERVAL '1' DAY")) {
+            assertTrue(rs.next());
+            assertEquals("22018", assertThrows(SQLException.class, () -> rs.getObject(1, Period.class)).getSQLState());
+            assertEquals(Duration.class.getName(), rs.getMetaData().getColumnClassName(1));
+        }
+    }
+
+    @Test
+    void savepoints() throws SQLException {
+        assertTrue(conn.getMetaData().supportsSavepoints());
+        exec("CREATE TABLE foo (x INTEGER)");
+
+        // Savepoints need a transaction.
+        assertEquals("25000", assertThrows(SQLException.class, conn::setSavepoint).getSQLState());
+
+        conn.setAutoCommit(false);
+        exec("INSERT INTO foo (x) VALUES (1)");
+        Savepoint one = conn.setSavepoint();
+        exec("INSERT INTO foo (x) VALUES (2)");
+        Savepoint two = conn.setSavepoint("two's \"name\"");
+        exec("INSERT INTO foo (x) VALUES (3)");
+        assertEquals("two's \"name\"", two.getSavepointName());
+        assertThrows(SQLException.class, two::getSavepointId);
+        assertThrows(SQLException.class, one::getSavepointName);
+        assertTrue(one.getSavepointId() > 0);
+
+        // A rollback closes the result sets.
+        Statement s = conn.createStatement();
+        ResultSet rs = s.executeQuery("SELECT x FROM foo");
+        conn.rollback(two);
+        assertTrue(rs.isClosed());
+        assertEquals(2, scalar(conn, "SELECT COUNT(*) FROM foo"));
+
+        // Rolling back to a savepoint destroys the savepoints after it.
+        Savepoint three = conn.setSavepoint();
+        exec("INSERT INTO foo (x) VALUES (4)");
+        conn.rollback(one);
+        assertEquals(1, scalar(conn, "SELECT COUNT(*) FROM foo"));
+        assertEquals("3B001", assertThrows(SQLException.class, () -> conn.rollback(three)).getSQLState());
+
+        // Releasing it keeps the changes.
+        Savepoint four = conn.setSavepoint();
+        exec("INSERT INTO foo (x) VALUES (5)");
+        Savepoint five = conn.setSavepoint();
+        conn.releaseSavepoint(four);
+        assertEquals("3B001", assertThrows(SQLException.class, () -> conn.rollback(four)).getSQLState());
+        assertEquals("3B001", assertThrows(SQLException.class, () -> conn.rollback(five)).getSQLState());
+        conn.commit();
+        assertEquals(2, scalar(conn, "SELECT COUNT(*) FROM foo"));
+        conn.commit();
+
+        // The savepoints end with the transaction.
+        assertEquals("3B001", assertThrows(SQLException.class, () -> conn.releaseSavepoint(one)).getSQLState());
+
+        try (Connection other = DriverManager.getConnection("jdbc:vsql::memory:")) {
+            other.setAutoCommit(false);
+            Savepoint theirs = other.setSavepoint();
+            assertEquals("3B001", assertThrows(SQLException.class, () -> conn.rollback(theirs)).getSQLState());
+        }
+        assertEquals("3B001", assertThrows(SQLException.class, () -> conn.rollback(null)).getSQLState());
+        assertEquals("HY009", assertThrows(SQLException.class, () -> conn.setSavepoint(null)).getSQLState());
+    }
+
+    @Test
+    void parameterMetaData() throws SQLException {
+        exec("""
+                CREATE TABLE foo (
+                    a INTEGER, b VARCHAR(20), c NUMERIC(10, 3), d VARBINARY(5), e INTERVAL DAY TO SECOND(3),
+                    f TIMESTAMP(2))""");
+        try (PreparedStatement s = conn.prepareStatement(
+                "INSERT INTO foo (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)")) {
+            ParameterMetaData md = s.getParameterMetaData();
+            assertEquals(6, md.getParameterCount());
+            assertEquals(Types.INTEGER, md.getParameterType(1));
+            assertEquals("INTEGER", md.getParameterTypeName(1));
+            assertEquals(Integer.class.getName(), md.getParameterClassName(1));
+            assertTrue(md.isSigned(1));
+            assertEquals(Types.VARCHAR, md.getParameterType(2));
+            assertEquals(20, md.getPrecision(2));
+            assertFalse(md.isSigned(2));
+            assertEquals(Types.NUMERIC, md.getParameterType(3));
+            assertEquals(10, md.getPrecision(3));
+            assertEquals(3, md.getScale(3));
+            assertEquals(Types.VARBINARY, md.getParameterType(4));
+            assertEquals(5, md.getPrecision(4));
+            assertEquals(Types.OTHER, md.getParameterType(5));
+            assertEquals("INTERVAL DAY TO SECOND", md.getParameterTypeName(5));
+            assertEquals(3, md.getScale(5));
+            assertEquals(Types.TIMESTAMP, md.getParameterType(6));
+            assertEquals(2, md.getScale(6));
+            assertEquals(ParameterMetaData.parameterModeIn, md.getParameterMode(1));
+            assertEquals(ParameterMetaData.parameterNullable, md.isNullable(1));
+            assertEquals("07009", assertThrows(SQLException.class, () -> md.getParameterType(7)).getSQLState());
+
+            // Binding a parameter doesn't change its type.
+            s.setLong(1, 1);
+            s.setString(2, "a");
+            s.setDouble(3, 1.5);
+            s.setBytes(4, new byte[] {1});
+            s.setObject(5, Duration.ofSeconds(1));
+            s.setObject(6, LocalDateTime.of(2022, 1, 2, 3, 4, 5));
+            s.executeUpdate();
+            assertEquals(Types.INTEGER, s.getParameterMetaData().getParameterType(1));
+        }
+        try (PreparedStatement s = conn.prepareStatement("SELECT * FROM foo WHERE a = ? AND b LIKE ?")) {
+            ParameterMetaData md = s.getParameterMetaData();
+            assertEquals(2, md.getParameterCount());
+            assertEquals(Types.INTEGER, md.getParameterType(1));
+            assertEquals(Types.VARCHAR, md.getParameterType(2));
+        }
+    }
+
+    @Test
+    void diagnostics() throws SQLException {
+        exec("CREATE TABLE foo (id INTEGER NOT NULL, CONSTRAINT foo_id UNIQUE (id))");
+        exec("INSERT INTO foo (id) VALUES (1)");
+        SQLException e = assertThrows(SQLIntegrityConstraintViolationException.class,
+                () -> exec("INSERT INTO foo (id) VALUES (1)"));
+        assertEquals("23505", e.getSQLState());
+        VsqlDiagnostics d = assertInstanceOf(VsqlException.class, e).getDiagnostics();
+        assertEquals("FOO_ID", d.constraintName());
+        assertEquals("PUBLIC", d.constraintSchema());
+        assertEquals("PUBLIC", d.schemaName());
+        assertEquals("FOO", d.tableName());
+        assertNull(d.columnName());
+        assertFalse(d.moreConditions());
+
+        e = assertThrows(SQLException.class, () -> exec("SELECT nope FROM foo"));
+        d = assertInstanceOf(VsqlException.class, e).getDiagnostics();
+        assertEquals("NOPE", d.columnName());
+        assertNull(d.constraintName());
+
+        // An error from the driver (rather than vsql) doesn't have them.
+        e = assertThrows(SQLException.class, () -> conn.createStatement().executeQuery("DELETE FROM foo"));
+        assertFalse(e instanceof VsqlException);
+    }
+
+    @Test
+    void databaseMetaData() throws SQLException {
+        VsqlDatabaseMetaData db = conn.getMetaData().unwrap(VsqlDatabaseMetaData.class);
+        // libvsql is built from a release.
+        assertEquals(Version.LIBVSQL, db.getDatabaseProductVersion());
+        assertEquals(Version.part(Version.LIBVSQL, 1), db.getDatabaseMinorVersion());
+        assertTrue(db.getBuildCommit().matches("[0-9a-f]{40}"), db.getBuildCommit());
+        assertTrue(db.getBuildDate().matches("\\d{4}-\\d{2}-\\d{2}"), db.getBuildDate());
+        assertFalse(db.getVVersion().isEmpty());
+        assertFalse(db.getVCommit().isEmpty());
+        assertFalse(db.getCCompiler().isEmpty());
+        assertEquals(Native.platform().substring(0, Native.platform().indexOf('-')), db.getOperatingSystem());
+        assertFalse(db.getMachine().isEmpty());
+        assertEquals(0, db.getFileReadVersion());
+        assertEquals(0, db.getFileWriteVersion());
+        try (Connection c = DriverManager.getConnection(url())) {
+            VsqlDatabaseMetaData file = c.getMetaData().unwrap(VsqlDatabaseMetaData.class);
+            assertTrue(file.getFileReadVersion() > 0);
+            assertTrue(file.getFileWriteVersion() >= file.getFileReadVersion());
+        }
+
+        List<String> names = new ArrayList<>();
+        int last = Integer.MIN_VALUE;
+        try (ResultSet rs = db.getTypeInfo()) {
+            assertNull(rs.getStatement());
+            assertEquals("DATA_TYPE", rs.getMetaData().getColumnName(2));
+            while (rs.next()) {
+                String name = rs.getString("TYPE_NAME");
+                names.add(name);
+                int type = rs.getInt("DATA_TYPE");
+                assertTrue(type >= last, name);
+                last = type;
+                switch (name) {
+                    case "BINARY LARGE OBJECT" -> {
+                        assertEquals(Types.BLOB, type);
+                        assertEquals("X'", rs.getString("LITERAL_PREFIX"));
+                        assertFalse(rs.getBoolean("CASE_SENSITIVE"));
+                    }
+                    case "CHARACTER LARGE OBJECT" -> {
+                        assertEquals(Types.CLOB, type);
+                        assertTrue(rs.getBoolean("CASE_SENSITIVE"));
+                    }
+                    case "INTERVAL DAY TO SECOND" -> {
+                        assertEquals(Types.OTHER, type);
+                        assertEquals(6, rs.getShort("MAXIMUM_SCALE"));
+                        assertEquals(10, rs.getInt("SQL_DATA_TYPE"));
+                    }
+                    case "INTEGER" -> {
+                        assertEquals(Types.INTEGER, type);
+                        assertEquals(2, rs.getInt("NUM_PREC_RADIX"));
+                        assertTrue(rs.getBoolean("FIXED_PREC_SCALE"));
+                    }
+                    default -> {
+                    }
+                }
+            }
+        }
+        assertTrue(names.containsAll(List.of("BINARY LARGE OBJECT", "CHARACTER LARGE OBJECT", "INTEGER",
+                "INTERVAL DAY TO SECOND", "TIMESTAMP WITH TIME ZONE")), names.toString());
     }
 }

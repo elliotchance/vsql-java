@@ -58,8 +58,27 @@ Windows 10 or later. vsql doesn't have Windows ARM64 C yet.
 
 Auto-commit is on: each statement is committed when it finishes (or when its
 result set is closed). With `conn.setAutoCommit(false)`, the first statement
-starts a transaction, which is ended by `conn.commit()` or `conn.rollback()`.
-vsql's transactions are `READ COMMITTED`.
+starts a transaction, which is ended by `conn.commit()` or `conn.rollback()`,
+and can have savepoints:
+
+```java
+conn.setAutoCommit(false);
+s.execute("INSERT INTO foo (x) VALUES (1)");
+Savepoint sp = conn.setSavepoint();
+s.execute("INSERT INTO foo (x) VALUES (2)");
+conn.rollback(sp); // only 1 is inserted
+conn.commit();
+```
+
+Each transaction has the isolation level of `conn.setTransactionIsolation()`
+(`READ COMMITTED` by default), and is `READ ONLY` (changing data is SQLSTATE
+`25006`) if `conn.setReadOnly(true)`. vsql runs `READ UNCOMMITTED` as
+`READ COMMITTED` (and it must be read only), and `REPEATABLE READ` as
+`SERIALIZABLE`. vsql's own default is `SERIALIZABLE`, but a `SERIALIZABLE`
+transaction that changes a table makes the other connections that use it wait
+for it to finish (for up to 5 seconds, then it's SQLSTATE `40001`), so the
+driver's default is `READ COMMITTED`. The isolation level and read only don't
+apply to statements that are executed with auto-commit on.
 
 ## Types
 
@@ -70,31 +89,70 @@ vsql's transactions are `READ COMMITTED`.
 | `REAL`                     | `Float`              | any number                 |
 | `DOUBLE PRECISION`         | `Double`             | any number                 |
 | `DECIMAL`, `NUMERIC`       | `BigDecimal`         | any number                 |
-| `CHARACTER`, `VARCHAR`     | `String`             | `String`                   |
+| `DECFLOAT`                 | `BigDecimal`         | any number                 |
+| `CHARACTER`, `VARCHAR`     | `String`             | `String`, `Clob`           |
+| `CLOB`                     | `Clob`               | `String`, `Clob`           |
+| `BINARY`, `VARBINARY`      | `byte[]`             | `byte[]`, `Blob`           |
+| `BLOB`                     | `Blob`               | `byte[]`, `Blob`           |
 | `BOOLEAN`                  | `Boolean`            | `Boolean`                  |
 | `DATE`                     | `java.sql.Date`      | `LocalDate`                |
 | `TIME`                     | `java.sql.Time`      | `LocalTime`                |
 | `TIME WITH TIME ZONE`      | `OffsetTime`         | `OffsetTime`               |
 | `TIMESTAMP`                | `java.sql.Timestamp` | `LocalDateTime`            |
 | `TIMESTAMP WITH TIME ZONE` | `OffsetDateTime`     | `OffsetDateTime`, `Instant` |
+| `INTERVAL YEAR TO MONTH`, `INTERVAL YEAR`, `INTERVAL MONTH` | `Period` | `Period` |
+| the other `INTERVAL`s      | `Duration`           | `Duration`                 |
 
-Parameters are `?`, and each Java type (including the `java.time` types) is
-sent as an SQL type, which is cast to the type it's used as. vsql doesn't have
-a binary type, so `setBytes` isn't supported.
+JDBC doesn't have `DECFLOAT` or intervals, so their `getColumnType` is
+`Types.DECIMAL` and `Types.OTHER`. A day of a day-time interval is 24 hours (as
+it is in SQL), and `getString` of an interval is the string in its literal,
+such as `"1-02"` for `INTERVAL '1-02' YEAR(2) TO MONTH`. `getString` of a
+binary string is its octets in hex. vsql doesn't have locators, so a `Blob` or
+`Clob` is a copy of the value in memory (and so is one from `createBlob` or
+`createClob`, which can be a parameter).
+
+Parameters are `?`, and each Java type (including the `java.time` types,
+`byte[]`, `Blob`, `Clob`, `Period` and `Duration`) is sent as an SQL type,
+which is cast to the type it's used as. vsql determines the type of each
+parameter from where it's used (such as the type of `x` in `x = ?`), which is
+what `getParameterMetaData()` describes.
 
 ## Errors
 
 An error from vsql is an `SQLException` with its SQLSTATE (`getSQLState()`),
 as the JDBC subclass for the SQLSTATE's class, such as `SQLSyntaxErrorException`
 for `42` (`42P01` is an undefined table) and
-`SQLIntegrityConstraintViolationException` for `23`.
+`SQLIntegrityConstraintViolationException` for `23`. Each diagnostic after the
+first is chained to it (`getNextException()`).
+
+It also implements `VsqlException`, whose `getDiagnostics()` has what JDBC
+doesn't: the violated constraint, its table, an unknown column, an invalid
+cursor, and whether vsql dropped some of the conditions:
+
+```java
+} catch (SQLIntegrityConstraintViolationException e) {
+    if (e instanceof VsqlException v) {
+        System.out.println(v.getDiagnostics().constraintName()); // such as "FOO_PK"
+    }
+}
+```
+
+## Metadata
+
+`DatabaseMetaData.getDatabaseProductVersion()` is the vsql release that libvsql
+is from, and `getTypeInfo()` describes each data type. `VsqlDatabaseMetaData`
+(`conn.getMetaData().unwrap(VsqlDatabaseMetaData.class)`) also has how libvsql
+was built (`getBuildCommit()`, `getBuildDate()`, `getVVersion()`, `getVCommit()`,
+`getCCompiler()`, `getOperatingSystem()` and `getMachine()`) and the file
+format versions of the database (`getFileReadVersion()` and
+`getFileWriteVersion()`).
 
 ## What isn't supported
 
-Scrollable or updatable result sets, generated keys, savepoints, stored
-procedures, LOBs and binary values, statement cancellation (the query timeout
-isn't used), and the `DatabaseMetaData` methods that describe tables (such as
-`getTables`). These throw `SQLFeatureNotSupportedException`.
+Scrollable or updatable result sets, generated keys, stored procedures,
+`NClob`, statement cancellation (the query timeout isn't used), and the
+`DatabaseMetaData` methods that describe tables (such as `getTables`). These
+throw `SQLFeatureNotSupportedException`.
 
 ## Developing
 

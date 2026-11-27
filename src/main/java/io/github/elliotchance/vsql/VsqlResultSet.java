@@ -1,8 +1,14 @@
 package io.github.elliotchance.vsql;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.io.Reader;
+import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
+import java.sql.Blob;
+import java.sql.Clob;
 import java.sql.Date;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -11,15 +17,20 @@ import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
+import java.time.Period;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Calendar;
+import java.util.HexFormat;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -29,7 +40,11 @@ import java.util.Map;
  */
 public final class VsqlResultSet extends UnsupportedResultSet {
     private final VsqlStatement statement;
+    private final Object lock;
     private final Column[] columns;
+    // The rows of a result set that's made by the driver (rather than a
+    // cursor), or null.
+    private final Iterator<Object[]> rows;
     private final long maxRows;
     private int fetchSize;
     private boolean open = true;
@@ -41,9 +56,24 @@ public final class VsqlResultSet extends UnsupportedResultSet {
 
     VsqlResultSet(VsqlStatement statement, Column[] columns, long maxRows, int fetchSize) {
         this.statement = statement;
+        this.lock = statement.connection;
         this.columns = columns;
+        this.rows = null;
         this.maxRows = maxRows;
         this.fetchSize = fetchSize;
+    }
+
+    /**
+     * A result set of rows in memory (such as DatabaseMetaData.getTypeInfo),
+     * which doesn't have a statement. Each value is the Java type of its
+     * column's kind (see Native.fetchRow).
+     */
+    VsqlResultSet(Column[] columns, List<Object[]> rows) {
+        this.statement = null;
+        this.lock = this;
+        this.columns = columns;
+        this.rows = rows.iterator();
+        this.maxRows = 0;
     }
 
     private void check() throws SQLException {
@@ -55,13 +85,15 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     private void closeCursor() throws SQLException {
         if (open) {
             open = false;
-            Native.closeCursor(statement.stmt);
+            if (rows == null) {
+                Native.closeCursor(statement.stmt);
+            }
         }
     }
 
     @Override
     public boolean next() throws SQLException {
-        synchronized (statement.connection) {
+        synchronized (lock) {
             check();
             row = null;
             if (done) {
@@ -73,7 +105,11 @@ public final class VsqlResultSet extends UnsupportedResultSet {
                 return false;
             }
             try {
-                row = Native.fetchRow(statement.stmt, columns);
+                if (rows != null) {
+                    row = rows.hasNext() ? rows.next() : null;
+                } else {
+                    row = Native.fetchRow(statement.stmt, columns);
+                }
             } catch (SQLException e) {
                 done = true;
                 closeCursor();
@@ -92,7 +128,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     /** Closes the result set (and its cursor). It does nothing if it's closed. */
     @Override
     public void close() throws SQLException {
-        synchronized (statement.connection) {
+        synchronized (lock) {
             if (closed) {
                 return;
             }
@@ -101,14 +137,16 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             try {
                 closeCursor();
             } finally {
-                statement.resultSetClosed(this);
+                if (statement != null) {
+                    statement.resultSetClosed(this);
+                }
             }
         }
     }
 
     @Override
     public boolean isClosed() {
-        synchronized (statement.connection) {
+        synchronized (lock) {
             return closed;
         }
     }
@@ -146,9 +184,11 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         Object v = value(index);
         return switch (v) {
             case null -> null;
-            // A datetime is read as its literal, such as
+            // A datetime or interval is read as its literal, such as
             // "TIMESTAMP '2022-01-02 15:04:05'".
-            case String s when isDatetime(column(index).jdbcType()) -> Values.unliteral(s);
+            case String s when isDatetime(column(index).jdbcType()) || column(index).isInterval() ->
+                    Values.unliteral(s);
+            case byte[] b -> HexFormat.of().withUpperCase().formatHex(b);
             default -> v.toString();
         };
     }
@@ -271,6 +311,63 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         return d == null ? null : d.setScale(scale, RoundingMode.HALF_UP);
     }
 
+    /** A BINARY, BINARY VARYING or BINARY LARGE OBJECT. */
+    @Override
+    public byte[] getBytes(int index) throws SQLException {
+        return switch (value(index)) {
+            case null -> null;
+            case byte[] b -> b.clone();
+            default -> throw cantConvert(column(index), "byte[]");
+        };
+    }
+
+    @Override
+    public InputStream getBinaryStream(int index) throws SQLException {
+        byte[] b = getBytes(index);
+        return b == null ? null : new ByteArrayInputStream(b);
+    }
+
+    /** A BINARY LARGE OBJECT (or another binary string), as a copy in memory. */
+    @Override
+    public Blob getBlob(int index) throws SQLException {
+        byte[] b = getBytes(index);
+        return b == null ? null : new VsqlBlob(b);
+    }
+
+    /** A CHARACTER LARGE OBJECT (or another string), as a copy in memory. */
+    @Override
+    public Clob getClob(int index) throws SQLException {
+        Object v = value(index);
+        if (v != null && !column(index).isCharacter()) {
+            throw cantConvert(column(index), "Clob");
+        }
+        return v == null ? null : new VsqlClob((String) v);
+    }
+
+    @Override
+    public Reader getCharacterStream(int index) throws SQLException {
+        String s = getString(index);
+        return s == null ? null : new StringReader(s);
+    }
+
+    /**
+     * An interval as a Period (YEAR, MONTH or YEAR TO MONTH) or a Duration
+     * (the others).
+     */
+    private Object interval(int index) throws SQLException {
+        Object v = value(index);
+        Column c = column(index);
+        if (v == null) {
+            return null;
+        }
+        if (!c.isInterval()) {
+            throw cantConvert(c, "interval");
+        }
+        String s = Values.unliteral((String) v);
+        return Interval.isYearMonth(c.dataType()) ? Interval.period(c.dataType(), s)
+                : Interval.duration(c.dataType(), s);
+    }
+
     /**
      * A DATE, TIME or TIMESTAMP as a LocalDate, LocalTime, OffsetTime,
      * LocalDateTime or OffsetDateTime (or null).
@@ -372,8 +469,9 @@ public final class VsqlResultSet extends UnsupportedResultSet {
 
     /**
      * The value as its Java type (see the package documentation): Integer,
-     * Long, Float, Double, BigDecimal, String, Boolean, java.sql.Date,
-     * java.sql.Time, OffsetTime, java.sql.Timestamp or OffsetDateTime.
+     * Long, Float, Double, BigDecimal, String, byte[], Blob, Clob, Boolean,
+     * java.sql.Date, java.sql.Time, OffsetTime, java.sql.Timestamp,
+     * OffsetDateTime, Period or Duration.
      */
     @Override
     public Object getObject(int index) throws SQLException {
@@ -390,15 +488,19 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             case java.sql.Types.TIME -> getTime(index);
             case java.sql.Types.TIMESTAMP -> getTimestamp(index);
             case java.sql.Types.TIME_WITH_TIMEZONE, java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> temporal(index);
-            default -> v;
+            case java.sql.Types.BINARY, java.sql.Types.VARBINARY -> getBytes(index);
+            case java.sql.Types.BLOB -> getBlob(index);
+            case java.sql.Types.CLOB -> getClob(index);
+            default -> c.isInterval() ? interval(index) : v;
         };
     }
 
     /**
      * The value as a type: String, Boolean, Byte, Short, Integer, Long, Float,
-     * Double, BigDecimal, BigInteger, LocalDate, LocalTime, LocalDateTime,
-     * OffsetTime, OffsetDateTime, ZonedDateTime, Instant, java.sql.Date,
-     * java.sql.Time, java.sql.Timestamp or Object. NULL is null.
+     * Double, BigDecimal, BigInteger, byte[], Blob, Clob, LocalDate,
+     * LocalTime, LocalDateTime, OffsetTime, OffsetDateTime, ZonedDateTime,
+     * Instant, Period, Duration, java.sql.Date, java.sql.Time,
+     * java.sql.Timestamp or Object. NULL is null.
      */
     @Override
     public <T> T getObject(int index, Class<T> type) throws SQLException {
@@ -438,6 +540,17 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             v = getTime(index);
         } else if (type == Timestamp.class) {
             v = getTimestamp(index);
+        } else if (type == byte[].class) {
+            v = getBytes(index);
+        } else if (type == Blob.class) {
+            v = getBlob(index);
+        } else if (type == Clob.class) {
+            v = getClob(index);
+        } else if (type == Period.class || type == Duration.class) {
+            v = interval(index);
+            if (!type.isInstance(v)) {
+                throw cantConvert(c, type.getName());
+            }
         } else {
             Object t = temporal(index);
             v = switch (t) {
@@ -536,6 +649,31 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     }
 
     @Override
+    public byte[] getBytes(String label) throws SQLException {
+        return getBytes(findColumn(label));
+    }
+
+    @Override
+    public InputStream getBinaryStream(String label) throws SQLException {
+        return getBinaryStream(findColumn(label));
+    }
+
+    @Override
+    public Blob getBlob(String label) throws SQLException {
+        return getBlob(findColumn(label));
+    }
+
+    @Override
+    public Clob getClob(String label) throws SQLException {
+        return getClob(findColumn(label));
+    }
+
+    @Override
+    public Reader getCharacterStream(String label) throws SQLException {
+        return getCharacterStream(findColumn(label));
+    }
+
+    @Override
     public Date getDate(String label) throws SQLException {
         return getDate(findColumn(label));
     }
@@ -586,6 +724,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         return new VsqlResultSetMetaData(columns);
     }
 
+    /** The statement, or null for a DatabaseMetaData result set. */
     @Override
     public Statement getStatement() throws SQLException {
         check();
