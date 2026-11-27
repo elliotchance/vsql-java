@@ -54,6 +54,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     private int isolation = TRANSACTION_READ_COMMITTED;
     private int savepoints;
     private final Set<VsqlStatement> statements = new LinkedHashSet<>();
+    private final Warnings warnings = new Warnings();
 
     VsqlConnection(String url, String database) throws SQLException {
         this.url = url;
@@ -65,7 +66,7 @@ public final class VsqlConnection extends UnsupportedConnection {
             throw e;
         }
         try {
-            Native.connect(dbc, database);
+            Native.connect(dbc, database, warnings);
         } catch (SQLException e) {
             Native.freeHandle(Native.SQL_HANDLE_DBC, dbc);
             Native.freeHandle(Native.SQL_HANDLE_ENV, env);
@@ -75,7 +76,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         // Each statement is committed when it finishes, unless it's in a
         // transaction started by begin.
         try {
-            Native.setAutocommit(dbc, true);
+            Native.setAutocommit(dbc, true, warnings);
         } catch (SQLException e) {
             close();
             throw e;
@@ -109,7 +110,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         int access = readOnly || isolation == TRANSACTION_READ_UNCOMMITTED
                 ? Native.SQL_TRANSACTION_READ_ONLY
                 : Native.SQL_TRANSACTION_READ_WRITE;
-        Native.startTran(dbc, access, isolation);
+        Native.startTran(dbc, access, isolation, warnings);
         inTransaction = true;
     }
 
@@ -155,7 +156,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         // The result sets are closed by the end of the transaction.
         closeResultSets();
         inTransaction = false;
-        Native.endTran(dbc, commit);
+        Native.endTran(dbc, commit, warnings);
     }
 
     private void closeResultSets() throws SQLException {
@@ -197,7 +198,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     private void execute(String sql) throws SQLException {
         int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, dbc);
         try {
-            Native.execDirect(stmt, sql);
+            Native.execDirect(stmt, sql, warnings);
         } finally {
             Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
         }
@@ -210,10 +211,10 @@ public final class VsqlConnection extends UnsupportedConnection {
     private String queryString(String sql) throws SQLException {
         int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, dbc);
         try {
-            Native.execDirect(stmt, sql);
+            Native.execDirect(stmt, sql, null);
             Column[] columns = {Native.describeCol(stmt, 1)};
-            Object[] row = new Native.Fetcher(stmt, columns).next();
-            Native.closeCursor(stmt);
+            Object[] row = new Native.Fetcher(stmt, columns).next(null);
+            Native.closeCursor(stmt, null);
             return row == null || row[0] == null ? null : row[0].toString();
         } finally {
             Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
@@ -244,14 +245,14 @@ public final class VsqlConnection extends UnsupportedConnection {
     public synchronized void rollback(Savepoint savepoint) throws SQLException {
         VsqlSavepoint s = savepoint(savepoint);
         closeResultSets();
-        Native.endSavepoint(dbc, s.sqlName, Native.SQL_SAVEPOINT_NAME_ROLLBACK);
+        Native.endSavepoint(dbc, s.sqlName, Native.SQL_SAVEPOINT_NAME_ROLLBACK, warnings);
     }
 
     /** Destroys the savepoint (and the savepoints after it). */
     @Override
     public synchronized void releaseSavepoint(Savepoint savepoint) throws SQLException {
         VsqlSavepoint s = savepoint(savepoint);
-        Native.endSavepoint(dbc, s.sqlName, Native.SQL_SAVEPOINT_NAME_RELEASE);
+        Native.endSavepoint(dbc, s.sqlName, Native.SQL_SAVEPOINT_NAME_RELEASE, warnings);
     }
 
     /** A BLOB in memory, which can be a parameter. */
@@ -343,7 +344,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, dbc);
         try {
             Native.execDirect(stmt, "SET SESSION CHARACTERISTICS AS TRANSACTION "
-                    + (readOnly ? "READ ONLY" : "READ WRITE"));
+                    + (readOnly ? "READ ONLY" : "READ WRITE"), warnings);
         } finally {
             Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
         }
@@ -475,7 +476,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         if (active) {
             inTransaction = false;
             try {
-                Native.endTran(dbc, false);
+                Native.endTran(dbc, false, null);
             } catch (SQLException e) {
                 error = add(error, e);
             }
@@ -512,15 +513,21 @@ public final class VsqlConnection extends UnsupportedConnection {
         close();
     }
 
+    /**
+     * The warnings of connecting, and of starting and ending transactions and
+     * savepoints (a statement's warnings are the statement's). They're kept
+     * until {@link #clearWarnings()}.
+     */
     @Override
-    public SQLWarning getWarnings() throws SQLException {
+    public synchronized SQLWarning getWarnings() throws SQLException {
         check();
-        return null;
+        return warnings.get();
     }
 
     @Override
-    public void clearWarnings() throws SQLException {
+    public synchronized void clearWarnings() throws SQLException {
         check();
+        warnings.clear();
     }
 
     /**

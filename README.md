@@ -225,6 +225,24 @@ cursor, and whether vsql dropped some of the conditions:
 }
 ```
 
+A warning from vsql (a statement that succeeded with a completion condition)
+is an `SQLWarning` (which also implements `VsqlException`), and each warning
+after the first is chained to it (`getNextWarning()`). Executing a statement
+sets the statement's `getWarnings()`, such as `01003` (null value eliminated
+in set function) for `SUM` over a `NULL` or `01004` (string data, right
+truncation) for a `CAST` that cuts a string. Reading a row sets the result
+set's, and connecting, `commit()`, `rollback()` and savepoints set the
+connection's. A statement's warnings are replaced when it's executed again
+(those of a batch are of all of its statements), a result set's when the next
+row is read, and any of them are removed by `clearWarnings()`.
+
+```java
+ResultSet rs = stmt.executeQuery("SELECT SUM(x) FROM foo");
+for (SQLWarning w = stmt.getWarnings(); w != null; w = w.getNextWarning()) {
+    System.out.println(w.getSQLState() + ": " + w.getMessage());
+}
+```
+
 ## Metadata
 
 `DatabaseMetaData.getDatabaseProductVersion()` is the vsql release that libvsql

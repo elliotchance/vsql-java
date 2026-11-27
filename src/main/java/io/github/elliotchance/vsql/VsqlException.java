@@ -3,7 +3,8 @@ package io.github.elliotchance.vsql;
 /**
  * Every SQLException from vsql (an error from libvsql, rather than the driver)
  * implements VsqlException, which has the diagnostic fields that JDBC doesn't
- * have, such as the name of a violated constraint:
+ * have, such as the name of a violated constraint (and so does every
+ * SQLWarning from vsql, see getWarnings):
  *
  * <pre>{@code
  * try {

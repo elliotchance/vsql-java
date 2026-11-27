@@ -40,7 +40,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         this.resultSetType = resultSetType;
         int handle = handle();
         try {
-            Native.prepare(handle, sql);
+            Native.prepare(handle, sql, warnings);
             parameters = Native.describeParams(handle);
             params = new Param[parameters.length];
         } catch (SQLException e) {
@@ -77,7 +77,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     private boolean run(Param[] values) throws SQLException {
         beforeExecute();
         try {
-            Native.execute(stmt, values);
+            Native.execute(stmt, values, warnings);
         } finally {
             connection.statementEnded();
         }
@@ -149,17 +149,23 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
             check();
             List<Param[]> sets = new ArrayList<>(batch);
             batch.clear();
+            warnings.clear();
             long[] counts = new long[sets.size()];
-            for (int i = 0; i < sets.size(); i++) {
-                try {
-                    if (run(sets.get(i))) {
-                        discardResultSet();
-                        throw Errors.sql("07000", "vsql: the statement is a query");
+            inBatch = true;
+            try {
+                for (int i = 0; i < sets.size(); i++) {
+                    try {
+                        if (run(sets.get(i))) {
+                            discardResultSet();
+                            throw Errors.sql("07000", "vsql: the statement is a query");
+                        }
+                        counts[i] = getLargeUpdateCount();
+                    } catch (SQLException e) {
+                        throw batchError(e, counts, i);
                     }
-                    counts[i] = getLargeUpdateCount();
-                } catch (SQLException e) {
-                    throw batchError(e, counts, i);
                 }
+            } finally {
+                inBatch = false;
             }
             return toInts(counts);
         }

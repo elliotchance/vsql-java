@@ -105,5 +105,11 @@
  * and each diagnostic after the first is chained to it. The driver's own
  * errors (such as SQLDataException for getInt of a string that isn't a
  * number) are the same subclasses, without the diagnostics.
+ *
+ * <p>A warning from vsql (such as 01003, null value eliminated in set
+ * function) is an SQLWarning of the statement that was executed, the result
+ * set that read a row, or the connection (for connecting and ending
+ * transactions and savepoints), see {@code getWarnings}. It also implements
+ * VsqlException, and each warning after the first is chained to it.
  */
 package io.github.elliotchance.vsql;
