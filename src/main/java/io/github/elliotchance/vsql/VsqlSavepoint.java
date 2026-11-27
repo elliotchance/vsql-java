@@ -23,7 +23,7 @@ final class VsqlSavepoint implements Savepoint {
     @Override
     public int getSavepointId() throws SQLException {
         if (name != null) {
-            throw new SQLException("vsql: a named savepoint doesn't have an id", "HY024");
+            throw Errors.sql("HY024", "vsql: a named savepoint doesn't have an id");
         }
         return id;
     }
@@ -31,7 +31,7 @@ final class VsqlSavepoint implements Savepoint {
     @Override
     public String getSavepointName() throws SQLException {
         if (name == null) {
-            throw new SQLException("vsql: an unnamed savepoint doesn't have a name", "HY024");
+            throw Errors.sql("HY024", "vsql: an unnamed savepoint doesn't have a name");
         }
         return name;
     }

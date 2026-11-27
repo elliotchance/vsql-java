@@ -18,7 +18,7 @@ public final class VsqlParameterMetaData implements ParameterMetaData {
 
     private Column param(int index) throws SQLException {
         if (index < 1 || index > params.length) {
-            throw new SQLException("vsql: invalid parameter index " + index, "07009");
+            throw Errors.sql("07009", "vsql: invalid parameter index " + index);
         }
         return params[index - 1];
     }
@@ -80,7 +80,7 @@ public final class VsqlParameterMetaData implements ParameterMetaData {
         if (iface.isInstance(this)) {
             return iface.cast(this);
         }
-        throw new SQLException("vsql: not a wrapper for " + iface.getName(), "HY000");
+        throw Errors.sql("HY000", "vsql: not a wrapper for " + iface.getName());
     }
 
     @Override

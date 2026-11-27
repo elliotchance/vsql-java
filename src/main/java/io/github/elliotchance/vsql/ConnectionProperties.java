@@ -56,12 +56,12 @@ final class ConnectionProperties {
                 int equals = setting.indexOf('=');
                 String name = equals < 0 ? setting : setting.substring(0, equals);
                 if (!NAMES.contains(name)) {
-                    throw new SQLException("vsql: unknown connection property " + name + " in the URL (it can be "
-                            + String.join(", ", NAMES) + ")", "08001");
+                    throw Errors.sql("08001", "vsql: unknown connection property " + name + " in the URL (it can be "
+                            + String.join(", ", NAMES) + ")");
                 }
                 if (equals < 0) {
-                    throw new SQLException("vsql: the connection property " + name
-                            + " in the URL has no value (such as " + name + "=...)", "08001");
+                    throw Errors.sql("08001", "vsql: the connection property " + name
+                            + " in the URL has no value (such as " + name + "=...)");
                 }
                 values.put(name, setting.substring(equals + 1));
             }
@@ -112,8 +112,8 @@ final class ConnectionProperties {
     }
 
     private static SQLException invalid(String name, String value, String valid) {
-        return new SQLException("vsql: invalid value for the connection property " + name + ": " + value
-                + " (it can be " + valid + ")", "08001");
+        return Errors.sql("08001", "vsql: invalid value for the connection property " + name + ": " + value
+                + " (it can be " + valid + ")");
     }
 
     /** Describes each property, with its value (or its default). */

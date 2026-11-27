@@ -13,7 +13,7 @@ public final class VsqlResultSetMetaData extends UnsupportedResultSetMetaData {
 
     private Column column(int index) throws SQLException {
         if (index < 1 || index > columns.length) {
-            throw new SQLException("vsql: invalid column index " + index, "07009");
+            throw Errors.sql("07009", "vsql: invalid column index " + index);
         }
         return columns[index - 1];
     }
@@ -147,7 +147,7 @@ public final class VsqlResultSetMetaData extends UnsupportedResultSetMetaData {
         if (iface.isInstance(this)) {
             return iface.cast(this);
         }
-        throw new SQLException("vsql: not a wrapper for " + iface.getName(), "HY000");
+        throw Errors.sql("HY000", "vsql: not a wrapper for " + iface.getName());
     }
 
     @Override

@@ -134,7 +134,7 @@ public class VsqlStatement extends UnsupportedStatement {
     public ResultSet executeQuery(String sql) throws SQLException {
         synchronized (connection) {
             if (!execute(sql)) {
-                throw new SQLException("vsql: the statement isn't a query", "07000");
+                throw Errors.sql("07000", "vsql: the statement isn't a query");
             }
             return resultSet;
         }
@@ -150,7 +150,7 @@ public class VsqlStatement extends UnsupportedStatement {
         synchronized (connection) {
             if (execute(sql)) {
                 discardResultSet();
-                throw new SQLException("vsql: the statement is a query", "07000");
+                throw Errors.sql("07000", "vsql: the statement is a query");
             }
             return updateCount;
         }
@@ -329,7 +329,7 @@ public class VsqlStatement extends UnsupportedStatement {
     public void setLargeMaxRows(long max) throws SQLException {
         check();
         if (max < 0) {
-            throw new SQLException("vsql: max rows can't be negative", "HY024");
+            throw Errors.sql("HY024", "vsql: max rows can't be negative");
         }
         maxRows = max;
     }
@@ -345,7 +345,7 @@ public class VsqlStatement extends UnsupportedStatement {
     public void setFetchSize(int rows) throws SQLException {
         check();
         if (rows < 0) {
-            throw new SQLException("vsql: the fetch size can't be negative", "HY024");
+            throw Errors.sql("HY024", "vsql: the fetch size can't be negative");
         }
         fetchSize = rows;
     }
@@ -378,7 +378,7 @@ public class VsqlStatement extends UnsupportedStatement {
     public void setQueryTimeout(int seconds) throws SQLException {
         check();
         if (seconds < 0) {
-            throw new SQLException("vsql: the query timeout can't be negative", "HY024");
+            throw Errors.sql("HY024", "vsql: the query timeout can't be negative");
         }
         queryTimeout = seconds;
     }
@@ -394,7 +394,7 @@ public class VsqlStatement extends UnsupportedStatement {
     public void setMaxFieldSize(int max) throws SQLException {
         check();
         if (max < 0) {
-            throw new SQLException("vsql: the max field size can't be negative", "HY024");
+            throw Errors.sql("HY024", "vsql: the max field size can't be negative");
         }
         maxFieldSize = max;
     }
@@ -474,7 +474,7 @@ public class VsqlStatement extends UnsupportedStatement {
         if (iface.isInstance(this)) {
             return iface.cast(this);
         }
-        throw new SQLException("vsql: not a wrapper for " + iface.getName(), "HY000");
+        throw Errors.sql("HY000", "vsql: not a wrapper for " + iface.getName());
     }
 
     @Override

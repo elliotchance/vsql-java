@@ -25,7 +25,7 @@ public final class VsqlClob implements Clob {
 
     private void check() throws SQLException {
         if (data == null) {
-            throw new SQLException("vsql: the Clob has been freed", "HY010");
+            throw Errors.sql("HY010", "vsql: the Clob has been freed");
         }
     }
 
@@ -33,7 +33,7 @@ public final class VsqlClob implements Clob {
     private int index(long pos) throws SQLException {
         check();
         if (pos < 1 || pos > data.length() + 1) {
-            throw new SQLException("vsql: invalid position " + pos, "22011");
+            throw Errors.sql("22011", "vsql: invalid position " + pos);
         }
         return (int) (pos - 1);
     }
@@ -48,7 +48,7 @@ public final class VsqlClob implements Clob {
     public String getSubString(long pos, int length) throws SQLException {
         int i = index(pos);
         if (length < 0) {
-            throw new SQLException("vsql: invalid length " + length, "22011");
+            throw Errors.sql("22011", "vsql: invalid length " + length);
         }
         return data.substring(i, i + Math.min(length, data.length() - i));
     }
@@ -63,7 +63,7 @@ public final class VsqlClob implements Clob {
     public Reader getCharacterStream(long pos, long length) throws SQLException {
         int i = index(pos);
         if (length < 0 || i + length > data.length()) {
-            throw new SQLException("vsql: invalid length " + length, "22011");
+            throw Errors.sql("22011", "vsql: invalid length " + length);
         }
         return new StringReader(data.substring(i, (int) (i + length)));
     }
@@ -95,7 +95,7 @@ public final class VsqlClob implements Clob {
     public int setString(long pos, String str, int offset, int len) throws SQLException {
         int i = index(pos);
         if (offset < 0 || len < 0 || offset + len > str.length()) {
-            throw new SQLException("vsql: invalid offset or length", "22011");
+            throw Errors.sql("22011", "vsql: invalid offset or length");
         }
         data.replace(i, Math.min(i + len, data.length()), str.substring(offset, offset + len));
         return len;
@@ -139,7 +139,7 @@ public final class VsqlClob implements Clob {
     public void truncate(long len) throws SQLException {
         check();
         if (len < 0 || len > data.length()) {
-            throw new SQLException("vsql: invalid length " + len, "22011");
+            throw Errors.sql("22011", "vsql: invalid length " + len);
         }
         data.setLength((int) len);
     }

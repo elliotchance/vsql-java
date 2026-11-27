@@ -233,10 +233,10 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     private Object value(int index) throws SQLException {
         check();
         if (row == null) {
-            throw new SQLException("vsql: the cursor isn't on a row", "24000");
+            throw Errors.sql("24000", "vsql: the cursor isn't on a row");
         }
         if (index < 1 || index > columns.length) {
-            throw new SQLException("vsql: invalid column index " + index, "07009");
+            throw Errors.sql("07009", "vsql: invalid column index " + index);
         }
         Object v = row[index - 1];
         wasNull = v == null;
@@ -280,7 +280,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     }
 
     private static SQLException cantConvert(Column column, String to) {
-        return new SQLException("vsql: a " + column.typeName() + " can't be read as a " + to, "22018");
+        return Errors.sql("22018", "vsql: a " + column.typeName() + " can't be read as a " + to);
     }
 
     @Override
@@ -339,7 +339,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
                 default -> throw cantConvert(c, to);
             };
         } catch (NumberFormatException e) {
-            throw new SQLException("vsql: \"" + v + "\" isn't a number", "22018", e);
+            throw Errors.sql("22018", "vsql: \"" + v + "\" isn't a number", e);
         }
     }
 
@@ -355,7 +355,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         }
         BigInteger i = d.setScale(0, RoundingMode.DOWN).toBigInteger();
         if (i.compareTo(BigInteger.valueOf(min)) < 0 || i.compareTo(BigInteger.valueOf(max)) > 0) {
-            throw new SQLException("vsql: " + d + " is out of range of a " + to, "22003");
+            throw Errors.sql("22003", "vsql: " + d + " is out of range of a " + to);
         }
         return i.longValue();
     }
@@ -655,7 +655,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     @Override
     public <T> T getObject(int index, Class<T> type) throws SQLException {
         if (type == null) {
-            throw new SQLException("vsql: the type can't be null", "HY009");
+            throw Errors.sql("HY009", "vsql: the type can't be null");
         }
         if (value(index) == null) {
             return null;
@@ -741,7 +741,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
                 return i + 1;
             }
         }
-        throw new SQLException("vsql: there's no column " + label, "42S22");
+        throw Errors.sql("42S22", "vsql: there's no column " + label);
     }
 
     @Override
@@ -906,7 +906,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         synchronized (lock) {
             check();
             if (statement == null) {
-                throw new SQLException("vsql: the result set doesn't have a cursor", "24000");
+                throw Errors.sql("24000", "vsql: the result set doesn't have a cursor");
             }
             return Native.getCursorName(statement.stmt);
         }
@@ -956,7 +956,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     public void setFetchSize(int rows) throws SQLException {
         check();
         if (rows < 0) {
-            throw new SQLException("vsql: the fetch size can't be negative", "HY024");
+            throw Errors.sql("HY024", "vsql: the fetch size can't be negative");
         }
         fetchSize = rows;
     }
@@ -983,7 +983,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (iface.isInstance(this)) {
             return iface.cast(this);
         }
-        throw new SQLException("vsql: not a wrapper for " + iface.getName(), "HY000");
+        throw Errors.sql("HY000", "vsql: not a wrapper for " + iface.getName());
     }
 
     @Override

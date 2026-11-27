@@ -23,7 +23,7 @@ public final class VsqlBlob implements Blob {
 
     private void check() throws SQLException {
         if (data == null) {
-            throw new SQLException("vsql: the Blob has been freed", "HY010");
+            throw Errors.sql("HY010", "vsql: the Blob has been freed");
         }
     }
 
@@ -31,7 +31,7 @@ public final class VsqlBlob implements Blob {
     private int index(long pos, long max) throws SQLException {
         check();
         if (pos < 1 || pos > max + 1) {
-            throw new SQLException("vsql: invalid position " + pos, "22011");
+            throw Errors.sql("22011", "vsql: invalid position " + pos);
         }
         return (int) (pos - 1);
     }
@@ -46,7 +46,7 @@ public final class VsqlBlob implements Blob {
     public byte[] getBytes(long pos, int len) throws SQLException {
         int i = index(pos, length);
         if (len < 0) {
-            throw new SQLException("vsql: invalid length " + len, "22011");
+            throw Errors.sql("22011", "vsql: invalid length " + len);
         }
         return Arrays.copyOfRange(data, i, i + Math.min(len, length - i));
     }
@@ -61,7 +61,7 @@ public final class VsqlBlob implements Blob {
     public InputStream getBinaryStream(long pos, long len) throws SQLException {
         int i = index(pos, length);
         if (len < 0 || i + len > length) {
-            throw new SQLException("vsql: invalid length " + len, "22011");
+            throw Errors.sql("22011", "vsql: invalid length " + len);
         }
         return new ByteArrayInputStream(data, i, (int) len);
     }
@@ -91,7 +91,7 @@ public final class VsqlBlob implements Blob {
     public int setBytes(long pos, byte[] bytes, int offset, int len) throws SQLException {
         int i = index(pos, length);
         if (offset < 0 || len < 0 || offset + len > bytes.length) {
-            throw new SQLException("vsql: invalid offset or length", "22011");
+            throw Errors.sql("22011", "vsql: invalid offset or length");
         }
         if (i + len > data.length) {
             data = Arrays.copyOf(data, Math.max(i + len, data.length * 2));
@@ -125,7 +125,7 @@ public final class VsqlBlob implements Blob {
     public void truncate(long len) throws SQLException {
         check();
         if (len < 0 || len > length) {
-            throw new SQLException("vsql: invalid length " + len, "22011");
+            throw Errors.sql("22011", "vsql: invalid length " + len);
         }
         length = (int) len;
     }

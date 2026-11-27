@@ -67,8 +67,7 @@ final class Values {
             case java.sql.Clob c -> clob(string(c));
             case Period p -> text(Native.SQL_INTERVAL_YEAR_TO_MONTH, YEAR_TO_MONTH_SIZE, 0, Interval.format(p));
             case Duration d -> text(Native.SQL_INTERVAL_DAY_TO_SECOND, DAY_TO_SECOND_SIZE, 6, Interval.format(d));
-            default -> throw new SQLException(
-                    "vsql: a " + x.getClass().getName() + " can't be a parameter", "07006");
+            default -> throw Errors.sql("07006", "vsql: a " + x.getClass().getName() + " can't be a parameter");
         };
     }
 
@@ -95,7 +94,7 @@ final class Values {
     static byte[] bytes(java.sql.Blob b) throws SQLException {
         long n = b.length();
         if (n > Integer.MAX_VALUE) {
-            throw new SQLException("vsql: the BLOB is too long", "22001");
+            throw Errors.sql("22001", "vsql: the BLOB is too long");
         }
         return b.getBytes(1, (int) n);
     }
@@ -103,7 +102,7 @@ final class Values {
     static String string(java.sql.Clob c) throws SQLException {
         long n = c.length();
         if (n > Integer.MAX_VALUE) {
-            throw new SQLException("vsql: the CLOB is too long", "22001");
+            throw Errors.sql("22001", "vsql: the CLOB is too long");
         }
         return c.getSubString(1, (int) n);
     }
@@ -133,7 +132,7 @@ final class Values {
         String integer = point < 0 ? unsigned : unsigned.substring(0, point);
         int integerDigits = Math.max(integer.replaceFirst("^0+", "").length(), 1);
         if (scale > Short.MAX_VALUE) {
-            throw new SQLException("vsql: " + s + " has too many digits", "22003");
+            throw Errors.sql("22003", "vsql: " + s + " has too many digits");
         }
 
         return text(Native.SQL_NUMERIC, integerDigits + scale, scale, s);
@@ -171,7 +170,7 @@ final class Values {
         }
         int seconds = offset.getTotalSeconds();
         if (seconds % 60 != 0) {
-            throw new SQLException("vsql: the offset " + offset + " isn't a whole number of minutes", "22009");
+            throw Errors.sql("22009", "vsql: the offset " + offset + " isn't a whole number of minutes");
         }
         int minutes = Math.abs(seconds / 60);
 
@@ -203,7 +202,7 @@ final class Values {
         try {
             return formatter.parse(unliteral(s));
         } catch (DateTimeParseException e) {
-            throw new SQLException("vsql: invalid " + type + ": " + s, "22007", e);
+            throw Errors.sql("22007", "vsql: invalid " + type + ": " + s, e);
         }
     }
 

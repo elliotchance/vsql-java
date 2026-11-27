@@ -58,7 +58,7 @@ final class Interval {
     }
 
     private static SQLException invalid(String s) {
-        return new SQLException("vsql: invalid interval: " + s, "22006");
+        return Errors.sql("22006", "vsql: invalid interval: " + s);
     }
 
     /** A year-month interval (the string in its literal) as a Period. */
@@ -107,7 +107,7 @@ final class Interval {
     /** A Period as the string of an INTERVAL YEAR TO MONTH ("-1-2"). */
     static String format(Period p) throws SQLException {
         if (p.getDays() != 0) {
-            throw new SQLException("vsql: a Period with days (" + p + ") can't be an interval", "22015");
+            throw Errors.sql("22015", "vsql: a Period with days (" + p + ") can't be an interval");
         }
         long months = p.toTotalMonths();
         long abs = Math.abs(months);
