@@ -111,6 +111,27 @@ public final class VsqlConnection extends UnsupportedConnection {
         inTransaction = true;
     }
 
+    /**
+     * Forgets the transaction if it has ended without the driver ending it,
+     * which is called after each statement (whether it succeeded or not).
+     * That's a COMMIT or ROLLBACK executed as SQL, or an error that rolled
+     * back the transaction (such as a 40001 serialization failure). Otherwise
+     * the next statement wouldn't start a transaction, and libvsql would
+     * commit it by itself.
+     */
+    synchronized void statementEnded() {
+        if (!inTransaction || closed) {
+            return;
+        }
+        try {
+            if (!Native.transactionActive(dbc)) {
+                inTransaction = false;
+            }
+        } catch (SQLException e) {
+            // The transaction is assumed to still be active, as it was.
+        }
+    }
+
     synchronized void remove(VsqlStatement statement) {
         statements.remove(statement);
     }
@@ -426,7 +447,17 @@ public final class VsqlConnection extends UnsupportedConnection {
                 error = add(error, e);
             }
         }
-        if (inTransaction) {
+        // A transaction can also have been started by a START TRANSACTION
+        // executed as SQL (even with auto-commit on).
+        boolean active = inTransaction;
+        if (!active) {
+            try {
+                active = Native.transactionActive(dbc);
+            } catch (SQLException e) {
+                error = add(error, e);
+            }
+        }
+        if (active) {
             inTransaction = false;
             try {
                 Native.endTran(dbc, false);

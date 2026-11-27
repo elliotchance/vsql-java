@@ -97,6 +97,10 @@ conn.rollback(sp); // only 1 is inserted
 conn.commit();
 ```
 
+An error that rolls back the transaction (such as a `40001` serialization
+failure) also ends it, and the next statement starts a new one. `COMMIT` and
+`ROLLBACK` can't be executed as SQL: use `commit()` and `rollback()`.
+
 Each transaction has the isolation level of `conn.setTransactionIsolation()`
 (`READ COMMITTED` by default), and is `READ ONLY` (changing data is SQLSTATE
 `25006`) if `conn.setReadOnly(true)`. vsql runs `READ UNCOMMITTED` as

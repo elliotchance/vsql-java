@@ -115,6 +115,7 @@ final class Native {
     static final short SQL_NO_NULLS = 0;
 
     static final short SQL_DIAG_MORE = 13;
+    static final short SQL_DIAG_TRANSACTION_ACTIVE = 36;
     static final short SQL_DIAG_CONSTRAINT_CATALOG = 15;
     static final short SQL_DIAG_CURSOR_NAME = 22;
 
@@ -556,6 +557,27 @@ final class Native {
         try {
             check((short) START_TRAN.invokeExact(SQL_HANDLE_DBC, dbc, accessMode, isolationLevel),
                     SQL_HANDLE_DBC, dbc);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * Whether the connection has an active transaction (SQLGetDiagField's
+     * SQL_DIAG_TRANSACTION_ACTIVE), including one that SQLStartTran started
+     * before any statement was executed.
+     */
+    static boolean transactionActive(int dbc) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment active = arena.allocate(JAVA_INT);
+            short rc = (short) GET_DIAG_FIELD.invokeExact(SQL_HANDLE_DBC, dbc, (short) 0, SQL_DIAG_TRANSACTION_ACTIVE,
+                    active, (short) 0, MemorySegment.NULL);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) {
+                throw Errors.sql("HY000", "vsql: can't read SQL_DIAG_TRANSACTION_ACTIVE");
+            }
+            return active.get(JAVA_INT, 0) != 0;
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {

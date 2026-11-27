@@ -126,6 +126,9 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         } catch (SQLException e) {
             done = true;
             closeCursor();
+            if (statement != null) {
+                statement.connection.statementEnded();
+            }
             throw e;
         }
         if (r == null) {
