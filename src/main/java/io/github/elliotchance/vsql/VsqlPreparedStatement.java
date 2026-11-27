@@ -75,7 +75,11 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
 
     private boolean run(Param[] values) throws SQLException {
         beforeExecute();
-        Native.execute(stmt, values);
+        try {
+            Native.execute(stmt, values);
+        } finally {
+            connection.statementEnded();
+        }
         return afterExecute();
     }
 

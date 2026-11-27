@@ -121,7 +121,11 @@ public class VsqlStatement extends UnsupportedStatement {
     public boolean execute(String sql) throws SQLException {
         synchronized (connection) {
             beforeExecute();
-            Native.execDirect(handle(), sql);
+            try {
+                Native.execDirect(handle(), sql);
+            } finally {
+                connection.statementEnded();
+            }
             return afterExecute();
         }
     }
