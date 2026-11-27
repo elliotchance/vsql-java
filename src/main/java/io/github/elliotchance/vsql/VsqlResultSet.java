@@ -7,6 +7,7 @@ import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Date;
@@ -53,6 +54,10 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     private Object[] row;
     private long rowNumber;
     private boolean wasNull;
+    // The first row, which isBeforeFirst fetches before next is called (it's
+    // null if there are no rows), and next returns.
+    private boolean lookedAhead;
+    private Object[] ahead;
 
     VsqlResultSet(VsqlStatement statement, Column[] columns, long maxRows, int fetchSize) {
         this.statement = statement;
@@ -91,37 +96,94 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         }
     }
 
+    /**
+     * Fetches the next row, or null after the last row (or max rows), which
+     * closes the cursor.
+     */
+    private Object[] fetch() throws SQLException {
+        if (maxRows > 0 && rowNumber >= maxRows) {
+            done = true;
+            closeCursor();
+            return null;
+        }
+        Object[] r;
+        try {
+            if (rows != null) {
+                r = rows.hasNext() ? rows.next() : null;
+            } else {
+                r = Native.fetchRow(statement.stmt, columns);
+            }
+        } catch (SQLException e) {
+            done = true;
+            closeCursor();
+            throw e;
+        }
+        if (r == null) {
+            done = true;
+            closeCursor();
+        }
+        return r;
+    }
+
     @Override
     public boolean next() throws SQLException {
         synchronized (lock) {
             check();
             row = null;
-            if (done) {
-                return false;
-            }
-            if (maxRows > 0 && rowNumber >= maxRows) {
-                done = true;
-                closeCursor();
-                return false;
-            }
-            try {
-                if (rows != null) {
-                    row = rows.hasNext() ? rows.next() : null;
-                } else {
-                    row = Native.fetchRow(statement.stmt, columns);
-                }
-            } catch (SQLException e) {
-                done = true;
-                closeCursor();
-                throw e;
+            if (lookedAhead) {
+                lookedAhead = false;
+                row = ahead;
+                ahead = null;
+            } else if (!done) {
+                row = fetch();
             }
             if (row == null) {
-                done = true;
-                closeCursor();
                 return false;
             }
             rowNumber++;
             return true;
+        }
+    }
+
+    /**
+     * Whether next hasn't been called and there's at least one row. Before
+     * next is called, it fetches the first row (which next returns), so it's
+     * false for an empty result set, whose cursor is then closed (which
+     * commits the statement, with auto-commit on).
+     */
+    @Override
+    public boolean isBeforeFirst() throws SQLException {
+        synchronized (lock) {
+            check();
+            if (rowNumber > 0) {
+                return false;
+            }
+            if (!lookedAhead) {
+                if (done) {
+                    return false;
+                }
+                ahead = fetch();
+                lookedAhead = true;
+            }
+            return ahead != null;
+        }
+    }
+
+    /** Whether next has returned false after at least one row. */
+    @Override
+    public boolean isAfterLast() throws SQLException {
+        synchronized (lock) {
+            check();
+            return done && row == null && rowNumber > 0;
+        }
+    }
+
+    /** Whether the cursor is on the first row. */
+    @Override
+    public boolean isFirst() throws SQLException {
+        synchronized (lock) {
+            check();
+            return row != null && rowNumber == 1;
         }
     }
 
@@ -134,6 +196,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             }
             closed = true;
             row = null;
+            ahead = null;
             try {
                 closeCursor();
             } finally {
@@ -348,6 +411,18 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     public Reader getCharacterStream(int index) throws SQLException {
         String s = getString(index);
         return s == null ? null : new StringReader(s);
+    }
+
+    @Override
+    public Reader getNCharacterStream(int index) throws SQLException {
+        return getCharacterStream(index);
+    }
+
+    /** The string as US-ASCII (a character that isn't ASCII is a "?"). */
+    @Override
+    public InputStream getAsciiStream(int index) throws SQLException {
+        String s = getString(index);
+        return s == null ? null : new ByteArrayInputStream(s.getBytes(StandardCharsets.US_ASCII));
     }
 
     /**
@@ -671,6 +746,16 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     @Override
     public Reader getCharacterStream(String label) throws SQLException {
         return getCharacterStream(findColumn(label));
+    }
+
+    @Override
+    public Reader getNCharacterStream(String label) throws SQLException {
+        return getNCharacterStream(findColumn(label));
+    }
+
+    @Override
+    public InputStream getAsciiStream(String label) throws SQLException {
+        return getAsciiStream(findColumn(label));
     }
 
     @Override

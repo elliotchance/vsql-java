@@ -5,6 +5,8 @@ import java.io.InputStream;
 import java.io.Reader;
 import java.io.StringWriter;
 import java.math.BigDecimal;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Date;
@@ -350,6 +352,56 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     @Override
     public void setCharacterStream(int index, Reader x, long length) throws SQLException {
         setClob(index, x, length);
+    }
+
+    /** A CHARACTER LARGE OBJECT, read from the reader now. */
+    @Override
+    public void setNCharacterStream(int index, Reader x) throws SQLException {
+        setClob(index, x, -1);
+    }
+
+    /** A CHARACTER LARGE OBJECT of length chars, read from the reader now. */
+    @Override
+    public void setNCharacterStream(int index, Reader x, long length) throws SQLException {
+        setClob(index, x, length);
+    }
+
+    /** A CHARACTER LARGE OBJECT of US-ASCII characters, read from the stream now. */
+    @Override
+    public void setAsciiStream(int index, InputStream x) throws SQLException {
+        setAsciiStream(index, x, -1L);
+    }
+
+    /**
+     * A CHARACTER LARGE OBJECT of length US-ASCII characters, read from the
+     * stream now.
+     */
+    @Override
+    public void setAsciiStream(int index, InputStream x, int length) throws SQLException {
+        setAsciiStream(index, x, (long) length);
+    }
+
+    /**
+     * A CHARACTER LARGE OBJECT of length US-ASCII characters, read from the
+     * stream now.
+     */
+    @Override
+    public void setAsciiStream(int index, InputStream x, long length) throws SQLException {
+        set(index, x == null ? Values.param(null)
+                : Values.clob(new String(read(x, length), StandardCharsets.US_ASCII)));
+    }
+
+    /** A CHARACTER VARYING of length octets of UTF-8, read from the stream now. */
+    @Deprecated
+    @Override
+    public void setUnicodeStream(int index, InputStream x, int length) throws SQLException {
+        set(index, x == null ? null : (Object) new String(read(x, length), StandardCharsets.UTF_8));
+    }
+
+    /** A CHARACTER VARYING of the URL. */
+    @Override
+    public void setURL(int index, URL x) throws SQLException {
+        set(index, x == null ? null : (Object) x.toString());
     }
 
     /** All of a stream (for a negative length), or length octets of it. */
