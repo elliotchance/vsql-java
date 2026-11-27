@@ -46,12 +46,20 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     // The rows of a result set that's made by the driver (rather than a
     // cursor), or null.
     private final Iterator<Object[]> rows;
+    // Reads the rows of the cursor (with the same buffers for every row), or
+    // null for a result set that's made by the driver.
+    private final Native.Fetcher fetcher;
     private final long maxRows;
     private int fetchSize;
     private boolean open = true;
     private boolean closed;
     private boolean done;
     private Object[] row;
+    // The value of each column of the row that a getter parsed from a string
+    // (see parsed), or null if it hasn't been. A column is only parsed as one
+    // kind of value (a BigDecimal, a date or time, or an interval), which is
+    // immutable.
+    private Object[] parsed;
     private long rowNumber;
     private boolean wasNull;
     // The first row, which isBeforeFirst fetches before next is called (it's
@@ -64,6 +72,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         this.lock = statement.connection;
         this.columns = columns;
         this.rows = null;
+        this.fetcher = new Native.Fetcher(statement.stmt, columns);
         this.maxRows = maxRows;
         this.fetchSize = fetchSize;
     }
@@ -71,13 +80,14 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     /**
      * A result set of rows in memory (such as DatabaseMetaData.getTypeInfo),
      * which doesn't have a statement. Each value is the Java type of its
-     * column's kind (see Native.fetchRow).
+     * column's kind (see Native.Fetcher.next).
      */
     VsqlResultSet(Column[] columns, List<Object[]> rows) {
         this.statement = null;
         this.lock = this;
         this.columns = columns;
         this.rows = rows.iterator();
+        this.fetcher = null;
         this.maxRows = 0;
     }
 
@@ -111,7 +121,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             if (rows != null) {
                 r = rows.hasNext() ? rows.next() : null;
             } else {
-                r = Native.fetchRow(statement.stmt, columns);
+                r = fetcher.next();
             }
         } catch (SQLException e) {
             done = true;
@@ -130,6 +140,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         synchronized (lock) {
             check();
             row = null;
+            parsed = null;
             if (lookedAhead) {
                 lookedAhead = false;
                 row = ahead;
@@ -197,6 +208,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             closed = true;
             row = null;
             ahead = null;
+            parsed = null;
             try {
                 closeCursor();
             } finally {
@@ -214,7 +226,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         }
     }
 
-    /** The raw value of a column (see Native.fetchRow), which sets wasNull. */
+    /** The raw value of a column (see Native.Fetcher.next), which sets wasNull. */
     private Object value(int index) throws SQLException {
         check();
         if (row == null) {
@@ -230,6 +242,32 @@ public final class VsqlResultSet extends UnsupportedResultSet {
 
     private Column column(int index) {
         return columns[index - 1];
+    }
+
+    /**
+     * The value that a getter parsed from the string of a column in this row
+     * (after value has checked the index), or null if it hasn't been.
+     */
+    private Object parsed(int index) {
+        return parsed == null ? null : parsed[index - 1];
+    }
+
+    /** Keeps the value that was parsed, see parsed. */
+    private void keep(int index, Object value) {
+        if (parsed == null) {
+            parsed = new Object[columns.length];
+        }
+        parsed[index - 1] = value;
+    }
+
+    /** The string of a number (or a character string) as a BigDecimal. */
+    private BigDecimal parseDecimal(int index, String s) {
+        if (parsed(index) instanceof BigDecimal d) {
+            return d;
+        }
+        BigDecimal d = new BigDecimal(s.trim());
+        keep(index, d);
+        return d;
     }
 
     @Override
@@ -294,7 +332,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
                 case Long l -> BigDecimal.valueOf(l);
                 case Double d -> new BigDecimal(Double.toString(d));
                 case Float f -> new BigDecimal(Float.toString(f));
-                case String s when c.isNumber() || c.isCharacter() -> new BigDecimal(s.trim());
+                case String s when c.isNumber() || c.isCharacter() -> parseDecimal(index, s);
                 default -> throw cantConvert(c, to);
             };
         } catch (NumberFormatException e) {
@@ -438,9 +476,15 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (!c.isInterval()) {
             throw cantConvert(c, "interval");
         }
+        Object p = parsed(index);
+        if (p != null) {
+            return p;
+        }
         String s = Values.unliteral((String) v);
-        return Interval.isYearMonth(c.dataType()) ? Interval.period(c.dataType(), s)
+        Object i = Interval.isYearMonth(c.dataType()) ? Interval.period(c.dataType(), s)
                 : Interval.duration(c.dataType(), s);
+        keep(index, i);
+        return i;
     }
 
     /**
@@ -453,8 +497,15 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             return null;
         }
         Column c = column(index);
+        if (!isDatetime(c.jdbcType())) {
+            throw cantConvert(c, "date or time");
+        }
+        Object p = parsed(index);
+        if (p != null) {
+            return p;
+        }
         String s = (String) (v instanceof String ? v : null);
-        return switch (c.jdbcType()) {
+        Object t = switch (c.jdbcType()) {
             case java.sql.Types.DATE -> Values.parseDate(s);
             case java.sql.Types.TIME -> Values.parseTime(s);
             case java.sql.Types.TIME_WITH_TIMEZONE -> Values.parseTimeWithTimeZone(s);
@@ -462,6 +513,8 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             case java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> Values.parseTimestampWithTimeZone(s);
             default -> throw cantConvert(c, "date or time");
         };
+        keep(index, t);
+        return t;
     }
 
     /**
