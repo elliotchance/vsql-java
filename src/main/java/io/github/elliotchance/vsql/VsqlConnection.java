@@ -166,13 +166,40 @@ public final class VsqlConnection extends UnsupportedConnection {
         }
         begin();
         VsqlSavepoint savepoint = new VsqlSavepoint(this, ++savepoints, name);
+        execute("SAVEPOINT " + savepoint.sqlName);
+        return savepoint;
+    }
+
+    /** Executes a statement that doesn't have a result, on its own handle. */
+    private void execute(String sql) throws SQLException {
         int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, dbc);
         try {
-            Native.execDirect(stmt, "SAVEPOINT " + savepoint.sqlName);
+            Native.execDirect(stmt, sql);
         } finally {
             Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
         }
-        return savepoint;
+    }
+
+    /**
+     * The value of a query that has one character string column and one row,
+     * executed on its own handle.
+     */
+    private String queryString(String sql) throws SQLException {
+        int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, dbc);
+        try {
+            Native.execDirect(stmt, sql);
+            Column[] columns = {Native.describeCol(stmt, 1)};
+            Object[] row = Native.fetchRow(stmt, columns);
+            Native.closeCursor(stmt);
+            return row == null || row[0] == null ? null : row[0].toString();
+        } finally {
+            Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
+        }
+    }
+
+    /** A character string literal of s. */
+    private static String literal(String s) {
+        return "'" + s.replace("'", "''") + "'";
     }
 
     private VsqlSavepoint savepoint(Savepoint savepoint) throws SQLException {
@@ -450,22 +477,57 @@ public final class VsqlConnection extends UnsupportedConnection {
         check();
     }
 
-    /** vsql doesn't have catalogs, so it's ignored. */
+    /**
+     * Changes the current catalog (with SET CATALOG), which is the database
+     * that unqualified schema names are in. A catalog is a database, named by
+     * its file name without the extension (such as "test" for test.vsql, or
+     * ":memory:"). The name is the name of the catalog exactly (as
+     * {@link #getCatalog()} returns it), otherwise it's an identifier, so a
+     * catalog named "FOO" is also found by "foo". A catalog that doesn't exist
+     * is an error (SQLSTATE 3D000), and the current catalog doesn't change. It
+     * can be changed during a transaction, and doesn't start one.
+     */
     @Override
-    public void setCatalog(String catalog) throws SQLException {
+    public synchronized void setCatalog(String catalog) throws SQLException {
         check();
+        if (catalog == null) {
+            throw new SQLException("vsql: the catalog can't be null", "HY009");
+        }
+        execute("SET CATALOG " + literal(catalog));
     }
 
+    /** The current catalog (CURRENT_CATALOG), such as ":memory:". */
     @Override
-    public String getCatalog() throws SQLException {
+    public synchronized String getCatalog() throws SQLException {
         check();
-        return null;
+        return queryString("VALUES CURRENT_CATALOG");
     }
 
+    /**
+     * Changes the current schema (with SET SCHEMA), which is the schema of
+     * unqualified table names. The name is the name of the schema exactly (as
+     * {@link #getSchema()} returns it, such as "PUBLIC"), it isn't an
+     * identifier, so CREATE SCHEMA foo is "FOO", and "foo" is a different
+     * schema. A schema that doesn't exist is an error (SQLSTATE 3F000), and
+     * the current schema doesn't change. It can be changed during a
+     * transaction, and doesn't start one.
+     */
     @Override
-    public String getSchema() throws SQLException {
+    public synchronized void setSchema(String schema) throws SQLException {
         check();
-        return null;
+        if (schema == null) {
+            throw new SQLException("vsql: the schema can't be null", "HY009");
+        }
+        // The value of SET SCHEMA is a schema name, so it's delimited to be
+        // exactly the name.
+        execute("SET SCHEMA " + literal("\"" + schema.replace("\"", "\"\"") + "\""));
+    }
+
+    /** The current schema (CURRENT_SCHEMA), which is "PUBLIC" by default. */
+    @Override
+    public synchronized String getSchema() throws SQLException {
+        check();
+        return queryString("VALUES CURRENT_SCHEMA");
     }
 
     @Override

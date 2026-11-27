@@ -36,6 +36,13 @@ doesn't exist), or `jdbc:vsql::memory:` for a database that only exists for the
 life of the connection. `VsqlDataSource` is a `DataSource` for a URL (such as
 for a connection pool).
 
+The database is a catalog, named by the file name without its extension (such
+as `test` for `test.vsql`, or `:memory:`). `conn.setSchema()` changes the
+schema of unqualified table names (`PUBLIC` by default), and the name is exact
+(as `conn.getSchema()` returns it), so `CREATE SCHEMA foo` is `"FOO"`.
+`conn.setCatalog()` changes the current catalog. A schema or catalog that
+doesn't exist is SQLSTATE `3F000` or `3D000`.
+
 See [example/Example.java](example/Example.java) for a complete program, and the
 [package documentation](src/main/java/io/github/elliotchance/vsql/package-info.java)
 for the Java type of each SQL type.
