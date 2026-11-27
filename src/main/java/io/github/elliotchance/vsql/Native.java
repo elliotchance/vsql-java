@@ -900,9 +900,12 @@ final class Native {
             }
 
             // The rest of the string (length) didn't fit, so the buffer has a
-            // null terminated piece of it.
+            // null terminated piece of it. The piece is always size - 1
+            // octets: it isn't read up to the first 0 octet, because the
+            // string can contain U+0000. It can end in the middle of a UTF-8
+            // character, so the octets are decoded at the end.
             if (rc == SQL_SUCCESS_WITH_INFO && length >= size) {
-                byte[] piece = buf.getString(0, StandardCharsets.ISO_8859_1).getBytes(StandardCharsets.ISO_8859_1);
+                byte[] piece = buf.asSlice(0, size - 1).toArray(JAVA_BYTE);
                 if (s == null) {
                     s = new java.io.ByteArrayOutputStream(length);
                 }
