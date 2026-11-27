@@ -17,7 +17,6 @@ import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 
@@ -27,11 +26,12 @@ import java.util.List;
  * which is cast to the type it's used as (see the package documentation).
  */
 public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
-    private Param[] params = new Param[0];
     private final List<Param[]> batch = new ArrayList<>();
     // The dynamic parameters, which are read when the statement is prepared,
     // since binding a parameter replaces its record in the IPD.
     private final Column[] parameters;
+    // The value of each parameter, or null if it isn't set.
+    private Param[] params;
 
     VsqlPreparedStatement(VsqlConnection connection, String sql) throws SQLException {
         super(connection);
@@ -39,6 +39,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         try {
             Native.prepare(handle, sql);
             parameters = Native.describeParams(handle);
+            params = new Param[parameters.length];
         } catch (SQLException e) {
             close();
             throw e;
@@ -48,11 +49,9 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     private void set(int index, Param param) throws SQLException {
         synchronized (connection) {
             check();
-            if (index < 1) {
-                throw new SQLException("vsql: invalid parameter index " + index, "07009");
-            }
-            if (index > params.length) {
-                params = Arrays.copyOf(params, index);
+            if (index < 1 || index > parameters.length) {
+                throw new SQLException("vsql: invalid parameter index " + index + ", the statement has "
+                        + parameters.length + " parameter" + (parameters.length == 1 ? "" : "s"), "07009");
             }
             params[index - 1] = param;
         }
@@ -62,7 +61,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         set(index, Values.param(x));
     }
 
-    /** The parameters, which must all be set. */
+    /** The value of every parameter, which must all be set. */
     private Param[] params() throws SQLException {
         for (int i = 0; i < params.length; i++) {
             if (params[i] == null) {
@@ -116,7 +115,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     public void clearParameters() throws SQLException {
         synchronized (connection) {
             check();
-            params = new Param[0];
+            params = new Param[parameters.length];
         }
     }
 

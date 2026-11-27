@@ -332,11 +332,9 @@ class VsqlTest {
     void parameterErrors() throws SQLException {
         try (PreparedStatement s = conn.prepareStatement("VALUES CAST(? AS INTEGER)")) {
             // Not set.
-            assertEquals("07001", assertThrows(SQLException.class, s::executeQuery).getSQLState());
-            // A gap.
-            s.setInt(2, 1);
             assertEquals("07002", assertThrows(SQLException.class, s::executeQuery).getSQLState());
-            s.clearParameters();
+            // There's only one parameter.
+            assertEquals("07009", assertThrows(SQLException.class, () -> s.setInt(2, 1)).getSQLState());
 
             assertEquals("07006",
                     assertThrows(SQLException.class, () -> s.setObject(1, new Object())).getSQLState());
@@ -354,7 +352,7 @@ class VsqlTest {
             s.executeQuery().close();
             s.clearParameters();
             s.setString(1, "a");
-            assertEquals("07001", assertThrows(SQLException.class, s::executeQuery).getSQLState());
+            assertEquals("07002", assertThrows(SQLException.class, s::executeQuery).getSQLState());
         }
     }
 
