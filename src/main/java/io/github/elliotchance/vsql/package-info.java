@@ -76,7 +76,7 @@
  * <tr><td>BOOLEAN</td><td>Boolean</td><td>Boolean</td></tr>
  * <tr><td>DATE</td><td>java.sql.Date</td><td>LocalDate</td></tr>
  * <tr><td>TIME</td><td>java.sql.Time</td><td>LocalTime</td></tr>
- * <tr><td>TIME WITH TIME ZONE</td><td>OffsetTime</td><td>OffsetTime</td></tr>
+ * <tr><td>TIME WITH TIME ZONE</td><td>OffsetTime</td><td>OffsetTime, LocalTime</td></tr>
  * <tr><td>TIMESTAMP</td><td>java.sql.Timestamp</td><td>LocalDateTime</td></tr>
  * <tr><td>TIMESTAMP WITH TIME ZONE</td><td>OffsetDateTime</td><td>OffsetDateTime, Instant</td></tr>
  * <tr><td>INTERVAL YEAR TO MONTH, YEAR, MONTH</td><td>Period</td><td>Period</td></tr>
@@ -85,11 +85,14 @@
  * </table>
  *
  * <p>java.sql.Date, Time and Timestamp are in the JVM's time zone (or a
- * Calendar's), so use the java.time types with getObject(i, Class) to read a
- * value exactly. JDBC doesn't have DECFLOAT or intervals, so their column
- * types are Types.DECIMAL and Types.OTHER. A day of a day-time interval is 24
- * hours (as it is in SQL). vsql doesn't have locators, so a Blob or Clob is a
- * copy of the value in memory.
+ * Calendar's), and keep their milliseconds, so use the java.time types with
+ * getObject(i, Class) to read a value exactly. A TIME WITH TIME ZONE that's
+ * read as a Time, Timestamp or LocalTime is converted to the JVM's time zone
+ * (like a TIMESTAMP WITH TIME ZONE is) as if it were on 1970-01-01. JDBC
+ * doesn't have DECFLOAT or intervals, so their column types are Types.DECIMAL
+ * and Types.OTHER. A day of a day-time interval is 24 hours (as it is in
+ * SQL). vsql doesn't have locators, so a Blob or Clob is a copy of the value
+ * in memory.
  *
  * <h2>Errors</h2>
  *

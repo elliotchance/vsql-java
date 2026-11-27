@@ -97,11 +97,19 @@ apply to statements that are executed with auto-commit on.
 | `BOOLEAN`                  | `Boolean`            | `Boolean`                  |
 | `DATE`                     | `java.sql.Date`      | `LocalDate`                |
 | `TIME`                     | `java.sql.Time`      | `LocalTime`                |
-| `TIME WITH TIME ZONE`      | `OffsetTime`         | `OffsetTime`               |
+| `TIME WITH TIME ZONE`      | `OffsetTime`         | `OffsetTime`, `LocalTime`  |
 | `TIMESTAMP`                | `java.sql.Timestamp` | `LocalDateTime`            |
 | `TIMESTAMP WITH TIME ZONE` | `OffsetDateTime`     | `OffsetDateTime`, `Instant` |
 | `INTERVAL YEAR TO MONTH`, `INTERVAL YEAR`, `INTERVAL MONTH` | `Period` | `Period` |
 | the other `INTERVAL`s      | `Duration`           | `Duration`                 |
+
+`java.sql.Date`, `Time` and `Timestamp` are in the JVM's time zone (or a
+`Calendar`'s), and keep their milliseconds. A `TIME WITH TIME ZONE` that's read
+as a `Time`, `Timestamp` or `LocalTime` is converted to the JVM's time zone
+(like a `TIMESTAMP WITH TIME ZONE` is) as if it were on 1970-01-01, so
+`TIME '10:00:00+05:00'` is `05:00:00` in UTC (and a `Timestamp` of it can be on
+the day before or after). Use `getObject(i, OffsetTime.class)` to read it
+exactly.
 
 JDBC doesn't have `DECFLOAT` or intervals, so their `getColumnType` is
 `Types.DECIMAL` and `Types.OTHER`. A day of a day-time interval is 24 hours (as
