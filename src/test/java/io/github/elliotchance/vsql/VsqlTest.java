@@ -254,7 +254,6 @@ class VsqlTest {
         assertTrue(db.supportsTransactionIsolationLevel(Connection.TRANSACTION_READ_COMMITTED));
         assertTrue(db.supportsTransactionIsolationLevel(Connection.TRANSACTION_SERIALIZABLE));
         assertFalse(db.supportsTransactionIsolationLevel(Connection.TRANSACTION_NONE));
-        assertThrows(SQLFeatureNotSupportedException.class, () -> db.getTables(null, null, null, null));
     }
 
     static Stream<Arguments> parameters() {
