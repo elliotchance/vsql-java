@@ -105,7 +105,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     public long executeLargeUpdate() throws SQLException {
         synchronized (connection) {
             if (execute()) {
-                closeResultSet();
+                discardResultSet();
                 throw new SQLException("vsql: the statement is a query", "07000");
             }
             return getLargeUpdateCount();
@@ -147,7 +147,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
             for (int i = 0; i < sets.size(); i++) {
                 try {
                     if (run(sets.get(i))) {
-                        closeResultSet();
+                        discardResultSet();
                         throw new SQLException("vsql: the statement is a query", "07000");
                     }
                     counts[i] = getLargeUpdateCount();
