@@ -126,6 +126,14 @@ final class Native {
     static final int SQL_INSENSITIVE = 1;
     static final short SQL_FETCH_ABSOLUTE = 5;
     static final short SQL_DESC_COUNT = 1001;
+    static final int SQL_ATTR_APP_ROW_DESC = 10010;
+    static final int SQL_ATTR_IMP_ROW_DESC = 10012;
+    static final short SQL_DESC_ARRAY_SIZE = 20;
+    static final short SQL_DESC_ARRAY_STATUS_POINTER = 21;
+    static final short SQL_DESC_ROWS_PROCESSED_POINTER = 34;
+    static final short SQL_UNBIND = 2;
+    static final int SQL_ROW_NO_ROW = 3;
+    static final int SQL_ROW_ERROR = 5;
     static final short SQL_DESC_LENGTH = 1003;
     static final short SQL_DESC_DATETIME_INTERVAL_PRECISION = 26;
 
@@ -189,6 +197,8 @@ final class Native {
     private static final MethodHandle GET_STMT_ATTR;
     private static final MethodHandle SET_STMT_ATTR;
     private static final MethodHandle GET_DESC_FIELD;
+    private static final MethodHandle SET_DESC_FIELD;
+    private static final MethodHandle BIND_COL;
     private static final MethodHandle GET_DESC_REC;
     private static final MethodHandle GET_TYPE_INFO;
     private static final MethodHandle SET_CURSOR_NAME;
@@ -238,6 +248,9 @@ final class Native {
         SET_STMT_ATTR = handle(linker, lib, "SQLSetStmtAttr", JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT);
         GET_DESC_FIELD = handle(linker, lib, "SQLGetDescField", JAVA_INT, JAVA_SHORT, JAVA_SHORT,
                 ADDRESS, JAVA_INT, ADDRESS);
+        SET_DESC_FIELD = handle(linker, lib, "SQLSetDescField", JAVA_INT, JAVA_SHORT, JAVA_SHORT, ADDRESS,
+                JAVA_INT);
+        BIND_COL = handle(linker, lib, "SQLBindCol", JAVA_INT, JAVA_SHORT, JAVA_SHORT, ADDRESS, JAVA_INT, ADDRESS);
         GET_DESC_REC = handle(linker, lib, "SQLGetDescRec", JAVA_INT, JAVA_SHORT, ADDRESS, JAVA_SHORT,
                 ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS);
         GET_TYPE_INFO = handle(linker, lib, "SQLGetTypeInfo", JAVA_INT, JAVA_SHORT);
@@ -990,10 +1003,24 @@ final class Native {
      * one thread (one at a time), so it can't be a confined Arena, and nothing
      * can use the memory after it's freed. libvsql only writes to the buffers
      * during SQLGetData, it doesn't keep them.
+     *
+     * <p>A Fetcher with a rowset size reads that many rows with each SQLFetch
+     * instead: each column is bound (SQLBindCol) to an array with an element
+     * for each row of the rowset, so a row is read without any downcalls. That
+     * needs every value to fit in its element, so a column that can be longer
+     * than WIDTH octets (such as a CLOB or BLOB) is read with SQLGetData. The
+     * columns stay bound (and libvsql keeps the arrays) until unbind, which
+     * the result set calls before its cursor is closed.
      */
     static final class Fetcher {
         private static final int SIZE = 256;
         private static final int KEEP = 1 << 20;
+
+        /** The rows of a rowset if the fetch size isn't set. */
+        static final int ROWSET = 64;
+
+        /** The longest element of a bound column, in octets. */
+        static final int WIDTH = 4096;
 
         private final int stmt;
         private final Column[] columns;
@@ -1003,13 +1030,225 @@ final class Native {
         // one when a value needs it.
         private MemorySegment buf;
 
+        // The number of rows of a rowset, or 0 to read each row with
+        // SQLGetData. The arrays are allocated (and the columns bound) by the
+        // first next.
+        private final int rowset;
+        private final int[] widths;
+        private MemorySegment[] data;
+        private MemorySegment[] lengths;
+        private MemorySegment status;
+        // The rows of the rowset that can be read, the next of them, and the
+        // error of the row after them (if it couldn't be fetched).
+        private int rows;
+        private int row;
+        private SQLException rowError;
+
         Fetcher(int stmt, Column[] columns) {
+            this(stmt, columns, 0);
+        }
+
+        /**
+         * A Fetcher that reads rowsets of up to rowset rows (fewer if the
+         * arrays of that many rows would be more than KEEP octets), or 0 for
+         * SQLGetData. It can only be used for a cursor that isn't scrollable,
+         * because it only fetches the next rowset.
+         */
+        Fetcher(int stmt, Column[] columns, int rowset) {
             this.stmt = stmt;
             this.columns = columns;
             Arena arena = Arena.ofAuto();
             ind = arena.allocate(JAVA_INT);
             number = arena.allocate(JAVA_LONG);
             buf = arena.allocate(SIZE);
+            widths = new int[columns.length];
+            int width = 0;
+            for (int i = 0; i < columns.length; i++) {
+                widths[i] = width(columns[i]);
+                if (widths[i] == 0) {
+                    rowset = 0;
+                }
+                width += widths[i] + 4;
+            }
+            this.rowset = Math.min(rowset, KEEP / Math.max(width, 1));
+        }
+
+        /**
+         * The octets of an element of a column's array (see Fetcher), or 0 if
+         * a value can be longer than WIDTH (or the size isn't known). A string
+         * is null terminated, and a value that's read as a string (such as a
+         * DECIMAL or a TIMESTAMP) is its literal.
+         */
+        static int width(Column c) {
+            int width = switch (c.kind()) {
+                case INTEGER, DOUBLE -> 8;
+                case REAL -> 4;
+                case BINARY -> c.dataType() == SQL_BLOB ? 0 : c.size();
+                case TEXT -> switch (c.dataType()) {
+                    case SQL_CLOB -> 0;
+                    case SQL_CHAR, SQL_VARCHAR -> c.size() > 0 ? c.size() + 1 : 0;
+                    case SQL_BOOLEAN -> 16;
+                    default -> c.size() > 0 ? c.size() + 64 : 0;
+                };
+            };
+            return width > 0 && width <= WIDTH ? width : 0;
+        }
+
+        /** Whether the columns are bound and read in rowsets. */
+        boolean rowsets() {
+            return rowset > 0;
+        }
+
+        /**
+         * Binds each column to an array of rowset elements, and the status of
+         * each row (in the IRD).
+         */
+        private void bind() throws SQLException {
+            Arena arena = Arena.ofAuto();
+            data = new MemorySegment[columns.length];
+            lengths = new MemorySegment[columns.length];
+            status = arena.allocate(JAVA_INT, rowset);
+            setDescField(SQL_ATTR_APP_ROW_DESC, SQL_DESC_ARRAY_SIZE, arena.allocateFrom(JAVA_INT, rowset));
+            setDescField(SQL_ATTR_IMP_ROW_DESC, SQL_DESC_ARRAY_STATUS_POINTER, status);
+            for (int i = 0; i < columns.length; i++) {
+                short type = switch (columns[i].kind()) {
+                    case INTEGER -> SQL_BIGINT;
+                    case DOUBLE -> SQL_DOUBLE;
+                    case REAL -> SQL_REAL;
+                    case TEXT -> SQL_CHAR;
+                    case BINARY -> SQL_BINARY;
+                };
+                data[i] = arena.allocate((long) widths[i] * rowset, 8);
+                lengths[i] = arena.allocate(JAVA_INT, rowset);
+                try {
+                    check((short) BIND_COL.invokeExact(stmt, (short) (i + 1), type, data[i], widths[i], lengths[i]),
+                            SQL_HANDLE_STMT, stmt);
+                } catch (SQLException e) {
+                    throw e;
+                } catch (Throwable t) {
+                    throw unexpected(t);
+                }
+            }
+        }
+
+        /**
+         * Unbinds the columns (and the status of each row), so that libvsql
+         * doesn't use the arrays after they're freed.
+         */
+        void unbind() throws SQLException {
+            if (data == null) {
+                return;
+            }
+            data = null;
+            try (Arena arena = Arena.ofConfined()) {
+                check((short) FREE_STMT.invokeExact(stmt, SQL_UNBIND), SQL_HANDLE_STMT, stmt);
+                setDescField(SQL_ATTR_APP_ROW_DESC, SQL_DESC_ARRAY_SIZE, arena.allocateFrom(JAVA_INT, 1));
+                setDescField(SQL_ATTR_IMP_ROW_DESC, SQL_DESC_ARRAY_STATUS_POINTER, MemorySegment.NULL);
+            } catch (SQLException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unexpected(t);
+            }
+        }
+
+        /**
+         * Sets a header field of the statement's ARD or IRD (descriptor). The
+         * value of an integer field is in value, and a pointer field is value
+         * itself.
+         */
+        private void setDescField(int descriptor, short field, MemorySegment value) throws SQLException {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handle = arena.allocate(JAVA_INT);
+                check((short) GET_STMT_ATTR.invokeExact(stmt, descriptor, handle, 0, MemorySegment.NULL),
+                        SQL_HANDLE_STMT, stmt);
+                int desc = handle.get(JAVA_INT, 0);
+                check((short) SET_DESC_FIELD.invokeExact(desc, (short) 0, field, value, 0), SQL_HANDLE_DESC, desc);
+            } catch (SQLException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw unexpected(t);
+            }
+        }
+
+        /**
+         * Fetches the next rowset (see next), it's false after the last row.
+         * The rows up to the first one that couldn't be fetched can be read,
+         * and then that row is an error. It's an error now if the first row
+         * couldn't be fetched.
+         */
+        private boolean fetchRowset() throws SQLException {
+            if (data == null) {
+                bind();
+            }
+            short rc;
+            try {
+                rc = (short) FETCH.invokeExact(stmt);
+            } catch (Throwable t) {
+                throw unexpected(t);
+            }
+            if (rc == SQL_NO_DATA) {
+                return false;
+            }
+            check(rc, SQL_HANDLE_STMT, stmt);
+            row = 0;
+            rows = 0;
+            while (rows < rowset && status.getAtIndex(JAVA_INT, rows) != SQL_ROW_NO_ROW) {
+                if (status.getAtIndex(JAVA_INT, rows) == SQL_ROW_ERROR) {
+                    rowError = rowError(diagnostics(SQL_HANDLE_STMT, stmt));
+                    break;
+                }
+                rows++;
+            }
+            if (rows == 0) {
+                throw rowError();
+            }
+            return true;
+        }
+
+        /**
+         * The error of a row from the diagnostics of a fetch, which can start
+         * with warnings (such as the 01000 for the rows that couldn't be
+         * fetched).
+         */
+        static SQLException rowError(SQLException diagnostics) {
+            for (SQLException e = diagnostics; e != null; e = e.getNextException()) {
+                if (!e.getSQLState().startsWith("01")) {
+                    return e;
+                }
+            }
+            return diagnostics;
+        }
+
+        private SQLException rowError() {
+            SQLException e = rowError;
+            rowError = null;
+            return e;
+        }
+
+        /** A row of the rowset (see next). */
+        private Object[] rowsetRow(int r) throws SQLException {
+            Object[] values = new Object[columns.length];
+            for (int i = 0; i < columns.length; i++) {
+                int length = lengths[i].getAtIndex(JAVA_INT, r);
+                if (length == SQL_NULL_DATA) {
+                    continue;
+                }
+                long offset = (long) r * widths[i];
+                Column.Kind kind = columns[i].kind();
+                if (length >= widths[i] && (kind == Column.Kind.TEXT || length > widths[i])) {
+                    throw Errors.sql("HY000", "vsql: the value of " + columns[i].name() + " is longer than "
+                            + widths[i] + " octets");
+                }
+                values[i] = switch (kind) {
+                    case INTEGER -> data[i].get(JAVA_LONG, offset);
+                    case DOUBLE -> data[i].get(JAVA_DOUBLE, offset);
+                    case REAL -> data[i].get(JAVA_FLOAT, offset);
+                    case TEXT -> new String(data[i].asSlice(offset, length).toArray(JAVA_BYTE),
+                            StandardCharsets.UTF_8);
+                    case BINARY -> data[i].asSlice(offset, length).toArray(JAVA_BYTE);
+                };
+            }
+            return values;
         }
 
         /**
@@ -1034,6 +1273,17 @@ final class Native {
          * byte[], or null for a NULL.
          */
         Object[] next() throws SQLException {
+            if (rowset > 0) {
+                if (row == rows) {
+                    if (rowError != null) {
+                        throw rowError();
+                    }
+                    if (!fetchRowset()) {
+                        return null;
+                    }
+                }
+                return rowsetRow(row++);
+            }
             short rc;
             try {
                 rc = (short) FETCH.invokeExact(stmt);
