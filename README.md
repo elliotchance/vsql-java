@@ -232,7 +232,30 @@ is from, and `getTypeInfo()` describes each data type. The methods that
 describe what vsql supports (such as `supportsFullOuterJoins()`,
 `getSQLKeywords()`, `nullsAreSortedLow()` and `getMaxTableNameLength()`) are
 read from libvsql where it has them (`SQLGetInfo`, and `SQLGetFeatureInfo` for
-the features of the SQL standard that vsql supports). `VsqlDatabaseMetaData`
+the features of the SQL standard that vsql supports).
+
+The database's objects are described by `getCatalogs()`, `getSchemas()`,
+`getTables()`, `getTableTypes()`, `getColumns()`, `getPrimaryKeys()`,
+`getImportedKeys()`, `getExportedKeys()`, `getCrossReference()` and
+`getBestRowIdentifier()`, from libvsql's catalog routines (such as
+`SQLTables`). The catalog is the name of the database (such as `:memory:`, or
+`mydb` for `mydb.vsql`), and names are stored in upper case unless they're
+quoted, so look for `"FOO"` rather than `"foo"`:
+
+```java
+ResultSet rs = conn.getMetaData().getColumns(null, "PUBLIC", "FOO", "%");
+while (rs.next()) {
+    System.out.println(rs.getString("COLUMN_NAME") + " " + rs.getString("TYPE_NAME"));
+}
+```
+
+vsql doesn't have stored procedures, user-defined functions or types,
+privileges or pseudo columns, so `getProcedures()`, `getFunctions()`,
+`getUDTs()`, `getTablePrivileges()` and the others like them return a result
+set without rows. So does `getIndexInfo()`, since libvsql doesn't describe
+indexes yet.
+
+`VsqlDatabaseMetaData`
 (`conn.getMetaData().unwrap(VsqlDatabaseMetaData.class)`) also has how libvsql
 was built (`getBuildCommit()`, `getBuildDate()`, `getVVersion()`, `getVCommit()`,
 `getCCompiler()`, `getOperatingSystem()` and `getMachine()`) and the file
@@ -242,9 +265,9 @@ format versions of the database (`getFileReadVersion()` and
 ## What isn't supported
 
 Scroll sensitive or updatable result sets, generated keys, stored procedures,
-`NClob`, statement cancellation (the query timeout isn't used), and the
-`DatabaseMetaData` methods that describe tables (such as `getTables`). These
-throw `SQLFeatureNotSupportedException`.
+`NClob`, and statement cancellation (the query timeout isn't used). These throw
+`SQLFeatureNotSupportedException`. `DatabaseMetaData.getIndexInfo()` is always
+empty.
 
 ## Developing
 

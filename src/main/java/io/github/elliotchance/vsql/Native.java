@@ -94,6 +94,12 @@ final class Native {
     static final short SQL_INTERVAL_MINUTE_TO_SECOND = 113;
     static final short SQL_ALL_TYPES = 0;
 
+    // The special values of SQLTables, and SQLSpecialColumns' IdentifierType.
+    static final String SQL_ALL_CATALOGS = "%";
+    static final String SQL_ALL_TABLE_TYPES = "%";
+    static final short SQL_BEST_ROWID = 1;
+    static final short SQL_NULLABLE = 1;
+
     static final int SQL_ATTR_AUTOCOMMIT = 102;
     static final int SQL_AUTOCOMMIT_OFF = 0;
     static final int SQL_AUTOCOMMIT_ON = 1;
@@ -193,6 +199,11 @@ final class Native {
     private static final MethodHandle GET_TYPE_INFO;
     private static final MethodHandle SET_CURSOR_NAME;
     private static final MethodHandle GET_CURSOR_NAME;
+    private static final MethodHandle TABLES;
+    private static final MethodHandle COLUMNS;
+    private static final MethodHandle PRIMARY_KEYS;
+    private static final MethodHandle FOREIGN_KEYS;
+    private static final MethodHandle SPECIAL_COLUMNS;
 
     // libvsql reads the value of SQL_ATTR_AUTOCOMMIT after SQLSetConnectAttr
     // returns, so it's never freed.
@@ -243,6 +254,16 @@ final class Native {
         GET_TYPE_INFO = handle(linker, lib, "SQLGetTypeInfo", JAVA_INT, JAVA_SHORT);
         SET_CURSOR_NAME = handle(linker, lib, "SQLSetCursorName", JAVA_INT, ADDRESS, JAVA_SHORT);
         GET_CURSOR_NAME = handle(linker, lib, "SQLGetCursorName", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS);
+        TABLES = handle(linker, lib, "SQLTables", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT,
+                ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT);
+        COLUMNS = handle(linker, lib, "SQLColumns", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT,
+                ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT);
+        PRIMARY_KEYS = handle(linker, lib, "SQLPrimaryKeys", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT,
+                ADDRESS, JAVA_SHORT);
+        FOREIGN_KEYS = handle(linker, lib, "SQLForeignKeys", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT,
+                ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT);
+        SPECIAL_COLUMNS = handle(linker, lib, "SQLSpecialColumns", JAVA_INT, JAVA_SHORT, ADDRESS, JAVA_SHORT,
+                ADDRESS, JAVA_SHORT, ADDRESS, JAVA_SHORT, JAVA_SHORT, JAVA_SHORT);
 
         // libvsql initializes itself (and its garbage collector) in the first
         // routine that's called, if it wasn't when it was loaded (see load).
@@ -794,6 +815,105 @@ final class Native {
             } catch (Throwable t) {
                 throw unexpected(t);
             }
+        }
+    }
+
+    /**
+     * A name argument of a catalog routine (such as SQLTables), which is a
+     * null pointer for null.
+     */
+    private static MemorySegment name(Arena arena, String name) {
+        return name == null ? MemorySegment.NULL : utf8(arena, name);
+    }
+
+    /** The length of a name argument of a catalog routine. */
+    private static short nameLength(String name) throws SQLException {
+        if (name == null) {
+            return 0;
+        }
+        int length = utf8Length(name);
+        if (length > Short.MAX_VALUE) {
+            throw Errors.sql("HY090", "the name is too long");
+        }
+        return (short) length;
+    }
+
+    /**
+     * Opens a cursor on stmt with SQLTables. Each name (and the table types)
+     * can be null, see VsqlDatabaseMetaData.getTables.
+     */
+    static void tables(int stmt, String catalog, String schema, String table, String tableTypes)
+            throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            check((short) TABLES.invokeExact(stmt, name(arena, catalog), nameLength(catalog), name(arena, schema),
+                    nameLength(schema), name(arena, table), nameLength(table), name(arena, tableTypes),
+                    nameLength(tableTypes)), SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /** Opens a cursor on stmt with SQLColumns. */
+    static void columns(int stmt, String catalog, String schema, String table, String column) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            check((short) COLUMNS.invokeExact(stmt, name(arena, catalog), nameLength(catalog), name(arena, schema),
+                    nameLength(schema), name(arena, table), nameLength(table), name(arena, column),
+                    nameLength(column)), SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /** Opens a cursor on stmt with SQLPrimaryKeys. */
+    static void primaryKeys(int stmt, String catalog, String schema, String table) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            check((short) PRIMARY_KEYS.invokeExact(stmt, name(arena, catalog), nameLength(catalog),
+                    name(arena, schema), nameLength(schema), name(arena, table), nameLength(table)),
+                    SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * Opens a cursor on stmt with SQLForeignKeys, for the foreign keys that
+     * reference the primary key of a table (pkTable), the foreign keys of a
+     * table (fkTable), or both.
+     */
+    static void foreignKeys(int stmt, String pkCatalog, String pkSchema, String pkTable, String fkCatalog,
+            String fkSchema, String fkTable) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            check((short) FOREIGN_KEYS.invokeExact(stmt, name(arena, pkCatalog), nameLength(pkCatalog),
+                    name(arena, pkSchema), nameLength(pkSchema), name(arena, pkTable), nameLength(pkTable),
+                    name(arena, fkCatalog), nameLength(fkCatalog), name(arena, fkSchema), nameLength(fkSchema),
+                    name(arena, fkTable), nameLength(fkTable)), SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * Opens a cursor on stmt with SQLSpecialColumns, for the columns that
+     * identify a row (SQL_BEST_ROWID).
+     */
+    static void specialColumns(int stmt, String catalog, String schema, String table, short scope,
+            short nullable) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            check((short) SPECIAL_COLUMNS.invokeExact(stmt, SQL_BEST_ROWID, name(arena, catalog),
+                    nameLength(catalog), name(arena, schema), nameLength(schema), name(arena, table),
+                    nameLength(table), scope, nullable), SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
         }
     }
 

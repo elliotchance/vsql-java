@@ -5,16 +5,21 @@ import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.RowIdLifetime;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Information about vsql and the driver, see {@link Connection#getMetaData()}.
- * The methods that describe the database's tables (such as getTables) aren't
- * supported yet.
+ * The methods that describe the database's objects (such as getTables and
+ * getColumns) use libvsql's catalog routines (such as SQLTables), and the ones
+ * for the objects that vsql doesn't have (such as getProcedures) return a
+ * result set without rows.
  */
 public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
     private final VsqlConnection connection;
@@ -949,6 +954,600 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
         return false;
     }
 
+    /** Opens a cursor on a statement handle, see rows. */
+    private interface Cursor {
+        void open(int stmt) throws SQLException;
+    }
+
+    /** The rows of a cursor, and the position of each column by its name. */
+    private record Rows(Map<String, Integer> columns, List<Object[]> rows) {
+        Object get(Object[] row, String column) {
+            return row[columns.get(column)];
+        }
+    }
+
+    /**
+     * Opens a cursor (such as with SQLTables) on a new statement handle, and
+     * reads all of its rows.
+     */
+    private Rows rows(Cursor cursor) throws SQLException {
+        synchronized (connection) {
+            connection.check();
+            int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, connection.dbc());
+            try {
+                cursor.open(stmt);
+                Column[] columns = new Column[Native.numResultCols(stmt)];
+                Map<String, Integer> names = new HashMap<>();
+                for (int i = 0; i < columns.length; i++) {
+                    columns[i] = Native.describeCol(stmt, i + 1);
+                    names.put(columns[i].name(), i);
+                }
+                List<Object[]> rows = new ArrayList<>();
+                Native.Fetcher fetcher = new Native.Fetcher(stmt, columns);
+                for (Object[] r = fetcher.next(); r != null; r = fetcher.next()) {
+                    rows.add(r);
+                }
+                Native.closeCursor(stmt);
+                return new Rows(names, rows);
+            } finally {
+                Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
+            }
+        }
+    }
+
+    /** A result set without rows (for the objects that vsql doesn't have). */
+    private ResultSet empty(Column[] columns) throws SQLException {
+        synchronized (connection) {
+            connection.check();
+            return new VsqlResultSet(columns, List.of());
+        }
+    }
+
+    /**
+     * Whether a catalog, schema or name is a zero-length string, which JDBC
+     * uses for an object without one (such as a table without a schema).
+     * Every object of vsql has a catalog, schema and name, so nothing matches.
+     */
+    private static boolean anyEmpty(String... names) {
+        for (String name : names) {
+            if (name != null && name.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A character string literal. */
+    private static String literal(String s) {
+        return "'" + s.replace("'", "''") + "'";
+    }
+
+    /**
+     * The condition (followed by AND) on a column for a name that's compared
+     * exactly, or for a LIKE pattern (where "\" escapes "%" and "_"), or ""
+     * for null, which matches anything.
+     */
+    private static String predicate(String column, String name, boolean pattern) {
+        if (name == null) {
+            return "";
+        }
+        return column + (pattern ? " LIKE " + literal(name) + " ESCAPE '\\' AND " : " = " + literal(name) + " AND ");
+    }
+
+    /**
+     * The java.sql.Types code for the DATA_TYPE (an SQL/CLI code) and
+     * TYPE_NAME of a column. A type that doesn't have an SQL/CLI code has a
+     * null DATA_TYPE.
+     */
+    private static long jdbcType(Object dataType, Object typeName) {
+        if (dataType != null) {
+            return new Column("", (short) number(dataType), 0, (short) 0, true).jdbcType();
+        }
+        return switch (String.valueOf(typeName)) {
+            case "BINARY" -> Types.BINARY;
+            case "BINARY VARYING", "VARBINARY" -> Types.VARBINARY;
+            case "DECFLOAT" -> Types.DECIMAL;
+            default -> Types.OTHER;
+        };
+    }
+
+    private static Column text(String name) {
+        return new Column(name, Native.SQL_VARCHAR, 512, (short) 0, true);
+    }
+
+    private static Column smallint(String name) {
+        return new Column(name, Native.SQL_SMALLINT, 0, (short) 0, true);
+    }
+
+    private static Column integer(String name) {
+        return new Column(name, Native.SQL_INTEGER, 0, (short) 0, true);
+    }
+
+    private static Column bigint(String name) {
+        return new Column(name, Native.SQL_BIGINT, 0, (short) 0, true);
+    }
+
+    private static Column booleanColumn(String name) {
+        return new Column(name, Native.SQL_BOOLEAN, 0, (short) 0, true);
+    }
+
+    private static final Column[] TABLES = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), text("TABLE_TYPE"), text("REMARKS"),
+        text("TYPE_CAT"), text("TYPE_SCHEM"), text("TYPE_NAME"), text("SELF_REFERENCING_COL_NAME"),
+        text("REF_GENERATION"),
+    };
+
+    /**
+     * The tables, from SQLTables. A base table is a "TABLE", and a view of
+     * the INFORMATION_SCHEMA is a "SYSTEM TABLE". The catalog is the name of
+     * the database (such as ":memory:"), and isn't a pattern.
+     */
+    @Override
+    public ResultSet getTables(String catalog, String schemaPattern, String tableNamePattern, String[] types)
+            throws SQLException {
+        if (anyEmpty(catalog, schemaPattern, tableNamePattern) || (types != null && types.length == 0)) {
+            return empty(TABLES);
+        }
+
+        // A table pattern of "%" (rather than null) is the same, but SQLTables
+        // returns the catalogs, schemas or table types when there are no other
+        // names.
+        String table = tableNamePattern == null ? "%" : tableNamePattern;
+        String typeList = types == null ? null : String.join(",", types);
+        Rows r = rows(stmt -> Native.tables(stmt, catalog, schemaPattern, table, typeList));
+        List<Object[]> rows = new ArrayList<>();
+        for (Object[] row : r.rows()) {
+            rows.add(new Object[] {
+                r.get(row, "TABLE_CAT"), r.get(row, "TABLE_SCHEM"), r.get(row, "TABLE_NAME"),
+                r.get(row, "TABLE_TYPE"), r.get(row, "REMARKS"), r.get(row, "UDT_CAT"), r.get(row, "UDT_SCHEM"),
+                r.get(row, "UDT_NAME"), r.get(row, "SELF_REF_COLUMN"), r.get(row, "REF_GENERATION"),
+            });
+        }
+        return new VsqlResultSet(TABLES, rows);
+    }
+
+    private static final Column[] CATALOGS = {text("TABLE_CAT")};
+
+    /** The catalogs (databases) of the connection, from SQLTables. */
+    @Override
+    public ResultSet getCatalogs() throws SQLException {
+        Rows r = rows(stmt -> Native.tables(stmt, Native.SQL_ALL_CATALOGS, null, null, null));
+        List<Object[]> rows = new ArrayList<>();
+        for (Object[] row : r.rows()) {
+            rows.add(new Object[] {r.get(row, "TABLE_CAT")});
+        }
+        return new VsqlResultSet(CATALOGS, rows);
+    }
+
+    private static final Column[] SCHEMAS = {text("TABLE_SCHEM"), text("TABLE_CATALOG")};
+
+    @Override
+    public ResultSet getSchemas() throws SQLException {
+        return getSchemas(null, null);
+    }
+
+    /**
+     * The schemas, from the INFORMATION_SCHEMA.SCHEMATA view, which (unlike
+     * SQLTables) includes the schemas that don't have any tables. They include
+     * the INFORMATION_SCHEMA and VSQL schemas.
+     */
+    @Override
+    public ResultSet getSchemas(String catalog, String schemaPattern) throws SQLException {
+        if (anyEmpty(catalog, schemaPattern)) {
+            return empty(SCHEMAS);
+        }
+
+        String sql = "SELECT SCHEMA_NAME, CATALOG_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE "
+                + predicate("CATALOG_NAME", catalog, false) + predicate("SCHEMA_NAME", schemaPattern, true)
+                + "1 = 1 ORDER BY CATALOG_NAME, SCHEMA_NAME";
+        return new VsqlResultSet(SCHEMAS, rows(stmt -> Native.execDirect(stmt, sql)).rows());
+    }
+
+    private static final Column[] TABLE_TYPES = {text("TABLE_TYPE")};
+
+    /**
+     * The types of the tables, from SQLTables. "TABLE" is always one of them,
+     * even when there aren't any tables yet.
+     */
+    @Override
+    public ResultSet getTableTypes() throws SQLException {
+        Rows r = rows(stmt -> Native.tables(stmt, null, null, null, Native.SQL_ALL_TABLE_TYPES));
+        Set<String> types = new TreeSet<>();
+        types.add("TABLE");
+        for (Object[] row : r.rows()) {
+            types.add((String) r.get(row, "TABLE_TYPE"));
+        }
+        List<Object[]> rows = new ArrayList<>();
+        for (String type : types) {
+            rows.add(new Object[] {type});
+        }
+        return new VsqlResultSet(TABLE_TYPES, rows);
+    }
+
+    private static final Column[] COLUMNS = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), text("COLUMN_NAME"), integer("DATA_TYPE"),
+        text("TYPE_NAME"), integer("COLUMN_SIZE"), integer("BUFFER_LENGTH"), integer("DECIMAL_DIGITS"),
+        integer("NUM_PREC_RADIX"), integer("NULLABLE"), text("REMARKS"), text("COLUMN_DEF"),
+        integer("SQL_DATA_TYPE"), integer("SQL_DATETIME_SUB"), integer("CHAR_OCTET_LENGTH"),
+        integer("ORDINAL_POSITION"), text("IS_NULLABLE"), text("SCOPE_CATALOG"), text("SCOPE_SCHEMA"),
+        text("SCOPE_TABLE"), smallint("SOURCE_DATA_TYPE"), text("IS_AUTOINCREMENT"), text("IS_GENERATEDCOLUMN"),
+    };
+
+    /**
+     * The columns of the tables, from SQLColumns. DATA_TYPE is the
+     * java.sql.Types code (see ResultSetMetaData.getColumnType), and TYPE_NAME
+     * is the name of the type without its length or precision, such as
+     * "CHARACTER VARYING". An identity column is IS_AUTOINCREMENT, and a
+     * generated column (GENERATED ALWAYS AS) is IS_GENERATEDCOLUMN.
+     */
+    @Override
+    public ResultSet getColumns(String catalog, String schemaPattern, String tableNamePattern,
+            String columnNamePattern) throws SQLException {
+        if (anyEmpty(catalog, schemaPattern, tableNamePattern, columnNamePattern)) {
+            return empty(COLUMNS);
+        }
+
+        Rows r = rows(stmt -> Native.columns(stmt, catalog, schemaPattern, tableNamePattern, columnNamePattern));
+
+        // SQLColumns doesn't have whether a column is an identity or generated
+        // column.
+        String sql = "SELECT TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, IS_IDENTITY, IS_GENERATED "
+                + "FROM INFORMATION_SCHEMA.COLUMNS WHERE " + predicate("TABLE_CATALOG", catalog, false)
+                + predicate("TABLE_SCHEMA", schemaPattern, true) + predicate("TABLE_NAME", tableNamePattern, true)
+                + predicate("COLUMN_NAME", columnNamePattern, true) + "1 = 1";
+        Map<List<Object>, Object[]> generated = new HashMap<>();
+        for (Object[] row : rows(stmt -> Native.execDirect(stmt, sql)).rows()) {
+            generated.put(List.of(row[0], row[1], row[2], row[3]), row);
+        }
+
+        List<Object[]> rows = new ArrayList<>();
+        for (Object[] row : r.rows()) {
+            Object[] g = generated.get(List.of(r.get(row, "TABLE_CAT"), r.get(row, "TABLE_SCHEM"),
+                    r.get(row, "TABLE_NAME"), r.get(row, "COLUMN_NAME")));
+            rows.add(new Object[] {
+                r.get(row, "TABLE_CAT"), r.get(row, "TABLE_SCHEM"), r.get(row, "TABLE_NAME"),
+                r.get(row, "COLUMN_NAME"), jdbcType(r.get(row, "DATA_TYPE"), r.get(row, "TYPE_NAME")),
+                r.get(row, "TYPE_NAME"), r.get(row, "COLUMN_SIZE"), r.get(row, "BUFFER_LENGTH"),
+                r.get(row, "DECIMAL_DIGITS"), r.get(row, "NUM_PREC_RADIX"), r.get(row, "NULLABLE"),
+                r.get(row, "REMARKS"), r.get(row, "COLUMN_DEF"), r.get(row, "SQL_DATA_TYPE"),
+                r.get(row, "SQL_DATETIME_SUB"), r.get(row, "CHAR_OCTET_LENGTH"), r.get(row, "ORDINAL_POSITION"),
+                r.get(row, "IS_NULLABLE"), r.get(row, "SCOPE_CAT"), r.get(row, "SCOPE_SCHEM"),
+                r.get(row, "SCOPE_NAME"), null,
+                g == null ? "" : "YES".equals(g[4]) ? "YES" : "NO",
+                g == null ? "" : "ALWAYS".equals(g[5]) ? "YES" : "NO",
+            });
+        }
+        return new VsqlResultSet(COLUMNS, rows);
+    }
+
+    private static final Column[] PRIMARY_KEYS = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), text("COLUMN_NAME"), smallint("KEY_SEQ"),
+        text("PK_NAME"),
+    };
+
+    /**
+     * The columns of the PRIMARY KEY of a table, from SQLPrimaryKeys. The
+     * names aren't patterns, and the table can't be null.
+     */
+    @Override
+    public ResultSet getPrimaryKeys(String catalog, String schema, String table) throws SQLException {
+        if (anyEmpty(catalog, schema, table)) {
+            return empty(PRIMARY_KEYS);
+        }
+
+        Rows r = rows(stmt -> Native.primaryKeys(stmt, catalog, schema, table));
+        List<Object[]> rows = new ArrayList<>();
+        for (Object[] row : r.rows()) {
+            rows.add(new Object[] {
+                r.get(row, "TABLE_CAT"), r.get(row, "TABLE_SCHEM"), r.get(row, "TABLE_NAME"),
+                r.get(row, "COLUMN_NAME"), r.get(row, "ORDINAL_POSITION"), r.get(row, "PK_NAME"),
+            });
+        }
+        rows.sort(Comparator.comparing(row -> (String) row[3]));
+        return new VsqlResultSet(PRIMARY_KEYS, rows);
+    }
+
+    private static final Column[] FOREIGN_KEYS = {
+        text("PKTABLE_CAT"), text("PKTABLE_SCHEM"), text("PKTABLE_NAME"), text("PKCOLUMN_NAME"),
+        text("FKTABLE_CAT"), text("FKTABLE_SCHEM"), text("FKTABLE_NAME"), text("FKCOLUMN_NAME"),
+        smallint("KEY_SEQ"), smallint("UPDATE_RULE"), smallint("DELETE_RULE"), text("FK_NAME"), text("PK_NAME"),
+        smallint("DEFERRABILITY"),
+    };
+
+    /**
+     * The foreign keys from SQLForeignKeys, which has the same codes for the
+     * rules and deferrability as JDBC (such as importedKeyCascade). The rows
+     * of each foreign key are together, ordered by their KEY_SEQ.
+     */
+    private List<Object[]> foreignKeys(String pkCatalog, String pkSchema, String pkTable, String fkCatalog,
+            String fkSchema, String fkTable) throws SQLException {
+        Rows r = rows(stmt -> Native.foreignKeys(stmt, pkCatalog, pkSchema, pkTable, fkCatalog, fkSchema,
+                fkTable));
+        List<Object[]> rows = new ArrayList<>();
+        for (Object[] row : r.rows()) {
+            rows.add(new Object[] {
+                r.get(row, "UK_TABLE_CAT"), r.get(row, "UK_TABLE_SCHEM"), r.get(row, "UK_TABLE_NAME"),
+                r.get(row, "UK_COLUMN_NAME"), r.get(row, "FK_TABLE_CAT"), r.get(row, "FK_TABLE_SCHEM"),
+                r.get(row, "FK_TABLE_NAME"), r.get(row, "FK_COLUMN_NAME"), r.get(row, "ORDINAL_POSITION"),
+                r.get(row, "UPDATE_RULE"), r.get(row, "DELETE_RULE"), r.get(row, "FK_NAME"), r.get(row, "UK_NAME"),
+                r.get(row, "DEFERABILITY"),
+            });
+        }
+        return rows;
+    }
+
+    private static void checkTable(String table) throws SQLException {
+        if (table == null) {
+            throw Errors.sql("HY009", "the table can't be null");
+        }
+    }
+
+    /**
+     * The columns of the foreign keys of a table (which can't be null), and
+     * the PRIMARY KEY or UNIQUE columns that they reference, from
+     * SQLForeignKeys.
+     */
+    @Override
+    public ResultSet getImportedKeys(String catalog, String schema, String table) throws SQLException {
+        checkTable(table);
+        if (anyEmpty(catalog, schema, table)) {
+            return empty(FOREIGN_KEYS);
+        }
+
+        List<Object[]> rows = foreignKeys(null, null, null, catalog, schema, table);
+        rows.sort(Comparator.comparing((Object[] row) -> (String) row[0]).thenComparing(row -> (String) row[1])
+                .thenComparing(row -> (String) row[2]));
+        return new VsqlResultSet(FOREIGN_KEYS, rows);
+    }
+
+    /**
+     * The columns of the foreign keys that reference the PRIMARY KEY of a
+     * table (which can't be null), from SQLForeignKeys.
+     */
+    @Override
+    public ResultSet getExportedKeys(String catalog, String schema, String table) throws SQLException {
+        checkTable(table);
+        if (anyEmpty(catalog, schema, table)) {
+            return empty(FOREIGN_KEYS);
+        }
+
+        return new VsqlResultSet(FOREIGN_KEYS, foreignKeys(catalog, schema, table, null, null, null));
+    }
+
+    /**
+     * The columns of the foreign keys of a table that reference the PRIMARY
+     * KEY or a UNIQUE constraint of another table, from SQLForeignKeys.
+     * Neither table can be null.
+     */
+    @Override
+    public ResultSet getCrossReference(String parentCatalog, String parentSchema, String parentTable,
+            String foreignCatalog, String foreignSchema, String foreignTable) throws SQLException {
+        checkTable(parentTable);
+        checkTable(foreignTable);
+        if (anyEmpty(parentCatalog, parentSchema, parentTable, foreignCatalog, foreignSchema, foreignTable)) {
+            return empty(FOREIGN_KEYS);
+        }
+
+        return new VsqlResultSet(FOREIGN_KEYS, foreignKeys(parentCatalog, parentSchema, parentTable,
+                foreignCatalog, foreignSchema, foreignTable));
+    }
+
+    private static final Column[] BEST_ROW_IDENTIFIER = {
+        smallint("SCOPE"), text("COLUMN_NAME"), integer("DATA_TYPE"), text("TYPE_NAME"), integer("COLUMN_SIZE"),
+        integer("BUFFER_LENGTH"), smallint("DECIMAL_DIGITS"), smallint("PSEUDO_COLUMN"),
+    };
+
+    /**
+     * The columns that identify a row of a table, from SQLSpecialColumns:
+     * the PRIMARY KEY or, without one, the UNIQUE constraint whose columns
+     * are all NOT NULL with the fewest columns. They're valid for the session
+     * (bestRowSession), and never NULL. The table can't be null.
+     */
+    @Override
+    public ResultSet getBestRowIdentifier(String catalog, String schema, String table, int scope,
+            boolean nullable) throws SQLException {
+        if (scope < bestRowTemporary || scope > bestRowSession) {
+            throw Errors.sql("HY098", "scope out of range");
+        }
+        if (anyEmpty(catalog, schema, table)) {
+            return empty(BEST_ROW_IDENTIFIER);
+        }
+
+        short n = nullable ? Native.SQL_NULLABLE : Native.SQL_NO_NULLS;
+        Rows r = rows(stmt -> Native.specialColumns(stmt, catalog, schema, table, (short) scope, n));
+        List<Object[]> rows = new ArrayList<>();
+        for (Object[] row : r.rows()) {
+            rows.add(new Object[] {
+                r.get(row, "SCOPE"), r.get(row, "COLUMN_NAME"),
+                jdbcType(r.get(row, "DATA_TYPE"), r.get(row, "TYPE_NAME")), r.get(row, "TYPE_NAME"),
+                r.get(row, "COLUMN_SIZE"), r.get(row, "BUFFER_LENGTH"), r.get(row, "DECIMAL_DIGITS"),
+                r.get(row, "PSEUDO_COLUMN"),
+            });
+        }
+        return new VsqlResultSet(BEST_ROW_IDENTIFIER, rows);
+    }
+
+    private static final Column[] INDEX_INFO = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), booleanColumn("NON_UNIQUE"),
+        text("INDEX_QUALIFIER"), text("INDEX_NAME"), smallint("TYPE"), smallint("ORDINAL_POSITION"), text("COLUMN_NAME"),
+        text("ASC_OR_DESC"), bigint("CARDINALITY"), bigint("PAGES"), text("FILTER_CONDITION"),
+    };
+
+    /**
+     * There's no SQL/CLI routine (or INFORMATION_SCHEMA view) for indexes, so
+     * it's always empty.
+     */
+    @Override
+    public ResultSet getIndexInfo(String catalog, String schema, String table, boolean unique,
+            boolean approximate) throws SQLException {
+        return empty(INDEX_INFO);
+    }
+
+    private static final Column[] VERSION_COLUMNS = {
+        smallint("SCOPE"), text("COLUMN_NAME"), integer("DATA_TYPE"), text("TYPE_NAME"), integer("COLUMN_SIZE"),
+        integer("BUFFER_LENGTH"), smallint("DECIMAL_DIGITS"), smallint("PSEUDO_COLUMN"),
+    };
+
+    /** No column is updated automatically, so it's always empty. */
+    @Override
+    public ResultSet getVersionColumns(String catalog, String schema, String table) throws SQLException {
+        return empty(VERSION_COLUMNS);
+    }
+
+    private static final Column[] PSEUDO_COLUMNS = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), text("COLUMN_NAME"), integer("DATA_TYPE"),
+        integer("COLUMN_SIZE"), integer("DECIMAL_DIGITS"), integer("NUM_PREC_RADIX"), text("COLUMN_USAGE"),
+        text("REMARKS"), integer("CHAR_OCTET_LENGTH"), text("IS_NULLABLE"),
+    };
+
+    /** There are no pseudo columns, so it's always empty. */
+    @Override
+    public ResultSet getPseudoColumns(String catalog, String schemaPattern, String tableNamePattern,
+            String columnNamePattern) throws SQLException {
+        return empty(PSEUDO_COLUMNS);
+    }
+
+    private static final Column[] TABLE_PRIVILEGES = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), text("GRANTOR"), text("GRANTEE"),
+        text("PRIVILEGE"), text("IS_GRANTABLE"),
+    };
+
+    /** vsql doesn't have privileges, so it's always empty. */
+    @Override
+    public ResultSet getTablePrivileges(String catalog, String schemaPattern, String tableNamePattern)
+            throws SQLException {
+        return empty(TABLE_PRIVILEGES);
+    }
+
+    private static final Column[] COLUMN_PRIVILEGES = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), text("COLUMN_NAME"), text("GRANTOR"),
+        text("GRANTEE"), text("PRIVILEGE"), text("IS_GRANTABLE"),
+    };
+
+    /** vsql doesn't have privileges, so it's always empty. */
+    @Override
+    public ResultSet getColumnPrivileges(String catalog, String schema, String table, String columnNamePattern)
+            throws SQLException {
+        return empty(COLUMN_PRIVILEGES);
+    }
+
+    private static final Column[] PROCEDURES = {
+        text("PROCEDURE_CAT"), text("PROCEDURE_SCHEM"), text("PROCEDURE_NAME"), text("RESERVED1"),
+        text("RESERVED2"), text("RESERVED3"), text("REMARKS"), smallint("PROCEDURE_TYPE"), text("SPECIFIC_NAME"),
+    };
+
+    /** vsql doesn't have stored procedures, so it's always empty. */
+    @Override
+    public ResultSet getProcedures(String catalog, String schemaPattern, String procedureNamePattern)
+            throws SQLException {
+        return empty(PROCEDURES);
+    }
+
+    private static final Column[] PROCEDURE_COLUMNS = {
+        text("PROCEDURE_CAT"), text("PROCEDURE_SCHEM"), text("PROCEDURE_NAME"), text("COLUMN_NAME"),
+        smallint("COLUMN_TYPE"), integer("DATA_TYPE"), text("TYPE_NAME"), integer("PRECISION"), integer("LENGTH"),
+        smallint("SCALE"), smallint("RADIX"), smallint("NULLABLE"), text("REMARKS"), text("COLUMN_DEF"),
+        integer("SQL_DATA_TYPE"), integer("SQL_DATETIME_SUB"), integer("CHAR_OCTET_LENGTH"),
+        integer("ORDINAL_POSITION"), text("IS_NULLABLE"), text("SPECIFIC_NAME"),
+    };
+
+    /** vsql doesn't have stored procedures, so it's always empty. */
+    @Override
+    public ResultSet getProcedureColumns(String catalog, String schemaPattern, String procedureNamePattern,
+            String columnNamePattern) throws SQLException {
+        return empty(PROCEDURE_COLUMNS);
+    }
+
+    private static final Column[] FUNCTIONS = {
+        text("FUNCTION_CAT"), text("FUNCTION_SCHEM"), text("FUNCTION_NAME"), text("REMARKS"),
+        smallint("FUNCTION_TYPE"), text("SPECIFIC_NAME"),
+    };
+
+    /**
+     * vsql doesn't have user-defined functions (the built-in functions are in
+     * getNumericFunctions and the others), so it's always empty.
+     */
+    @Override
+    public ResultSet getFunctions(String catalog, String schemaPattern, String functionNamePattern)
+            throws SQLException {
+        return empty(FUNCTIONS);
+    }
+
+    private static final Column[] FUNCTION_COLUMNS = {
+        text("FUNCTION_CAT"), text("FUNCTION_SCHEM"), text("FUNCTION_NAME"), text("COLUMN_NAME"),
+        smallint("COLUMN_TYPE"), integer("DATA_TYPE"), text("TYPE_NAME"), integer("PRECISION"), integer("LENGTH"),
+        smallint("SCALE"), smallint("RADIX"), smallint("NULLABLE"), text("REMARKS"), integer("CHAR_OCTET_LENGTH"),
+        integer("ORDINAL_POSITION"), text("IS_NULLABLE"), text("SPECIFIC_NAME"),
+    };
+
+    /** See getFunctions, it's always empty. */
+    @Override
+    public ResultSet getFunctionColumns(String catalog, String schemaPattern, String functionNamePattern,
+            String columnNamePattern) throws SQLException {
+        return empty(FUNCTION_COLUMNS);
+    }
+
+    private static final Column[] UDTS = {
+        text("TYPE_CAT"), text("TYPE_SCHEM"), text("TYPE_NAME"), text("CLASS_NAME"), integer("DATA_TYPE"),
+        text("REMARKS"), smallint("BASE_TYPE"),
+    };
+
+    /** vsql doesn't have user-defined types, so it's always empty. */
+    @Override
+    public ResultSet getUDTs(String catalog, String schemaPattern, String typeNamePattern, int[] types)
+            throws SQLException {
+        return empty(UDTS);
+    }
+
+    private static final Column[] SUPER_TYPES = {
+        text("TYPE_CAT"), text("TYPE_SCHEM"), text("TYPE_NAME"), text("SUPERTYPE_CAT"), text("SUPERTYPE_SCHEM"),
+        text("SUPERTYPE_NAME"),
+    };
+
+    /** vsql doesn't have user-defined types, so it's always empty. */
+    @Override
+    public ResultSet getSuperTypes(String catalog, String schemaPattern, String typeNamePattern)
+            throws SQLException {
+        return empty(SUPER_TYPES);
+    }
+
+    private static final Column[] SUPER_TABLES = {
+        text("TABLE_CAT"), text("TABLE_SCHEM"), text("TABLE_NAME"), text("SUPERTABLE_NAME"),
+    };
+
+    /** vsql doesn't have typed tables, so it's always empty. */
+    @Override
+    public ResultSet getSuperTables(String catalog, String schemaPattern, String tableNamePattern)
+            throws SQLException {
+        return empty(SUPER_TABLES);
+    }
+
+    private static final Column[] ATTRIBUTES = {
+        text("TYPE_CAT"), text("TYPE_SCHEM"), text("TYPE_NAME"), text("ATTR_NAME"), integer("DATA_TYPE"),
+        text("ATTR_TYPE_NAME"), integer("ATTR_SIZE"), integer("DECIMAL_DIGITS"), integer("NUM_PREC_RADIX"),
+        integer("NULLABLE"), text("REMARKS"), text("ATTR_DEF"), integer("SQL_DATA_TYPE"),
+        integer("SQL_DATETIME_SUB"), integer("CHAR_OCTET_LENGTH"), integer("ORDINAL_POSITION"),
+        text("IS_NULLABLE"), text("SCOPE_CATALOG"), text("SCOPE_SCHEMA"), text("SCOPE_TABLE"),
+        smallint("SOURCE_DATA_TYPE"),
+    };
+
+    /** vsql doesn't have user-defined types, so it's always empty. */
+    @Override
+    public ResultSet getAttributes(String catalog, String schemaPattern, String typeNamePattern,
+            String attributeNamePattern) throws SQLException {
+        return empty(ATTRIBUTES);
+    }
+
+    private static final Column[] CLIENT_INFO_PROPERTIES = {
+        text("NAME"), integer("MAX_LEN"), text("DEFAULT_VALUE"), text("DESCRIPTION"),
+    };
+
+    /** There are no client info properties, so it's always empty. */
+    @Override
+    public ResultSet getClientInfoProperties() throws SQLException {
+        return empty(CLIENT_INFO_PROPERTIES);
+    }
+
     // The columns of getTypeInfo.
     private static final Column[] TYPE_INFO = {
         new Column("TYPE_NAME", Native.SQL_VARCHAR, 512, (short) 0, false),
@@ -979,27 +1578,11 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
     @Override
     public ResultSet getTypeInfo() throws SQLException {
         List<Object[]> rows = new ArrayList<>();
-        synchronized (connection) {
-            connection.check();
-            int stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, connection.dbc());
-            try {
-                Native.getTypeInfo(stmt);
-                Column[] columns = new Column[Native.numResultCols(stmt)];
-                for (int i = 0; i < columns.length; i++) {
-                    columns[i] = Native.describeCol(stmt, i + 1);
-                }
-                Native.Fetcher fetcher = new Native.Fetcher(stmt, columns);
-                for (Object[] r = fetcher.next(); r != null; r = fetcher.next()) {
-                    Column type = new Column("", (short) number(r[1]), 0, (short) 0, true);
-                    rows.add(new Object[] {
-                        r[0], (long) type.jdbcType(), r[2], r[3], r[4], r[5], r[6], bool(r[7]), r[8], bool(r[9]),
-                        bool(r[10]), bool(r[11]), r[12], r[13], r[14], r[15], r[16], r[17],
-                    });
-                }
-                Native.closeCursor(stmt);
-            } finally {
-                Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
-            }
+        for (Object[] r : rows(Native::getTypeInfo).rows()) {
+            rows.add(new Object[] {
+                r[0], jdbcType(r[1], r[0]), r[2], r[3], r[4], r[5], r[6], bool(r[7]), r[8], bool(r[9]),
+                bool(r[10]), bool(r[11]), r[12], r[13], r[14], r[15], r[16], r[17],
+            });
         }
         rows.sort(Comparator.comparingLong(r -> (long) r[1]));
         return new VsqlResultSet(TYPE_INFO, rows);
