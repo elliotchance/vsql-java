@@ -120,6 +120,11 @@ final class Native {
     static final short SQL_DIAG_CURSOR_NAME = 22;
 
     static final int SQL_ATTR_IMP_PARAM_DESC = 10013;
+    static final int SQL_ATTR_CURSOR_SENSITIVITY = -2;
+    static final int SQL_ATTR_CURSOR_SCROLLABLE = -1;
+    static final int SQL_SCROLLABLE = 1;
+    static final int SQL_INSENSITIVE = 1;
+    static final short SQL_FETCH_ABSOLUTE = 5;
     static final short SQL_DESC_COUNT = 1001;
     static final short SQL_DESC_LENGTH = 1003;
     static final short SQL_DESC_DATETIME_INTERVAL_PRECISION = 26;
@@ -173,6 +178,7 @@ final class Native {
     private static final MethodHandle NUM_RESULT_COLS;
     private static final MethodHandle DESCRIBE_COL;
     private static final MethodHandle FETCH;
+    private static final MethodHandle FETCH_SCROLL;
     private static final MethodHandle GET_DATA;
     private static final MethodHandle CLOSE_CURSOR;
     private static final MethodHandle FREE_STMT;
@@ -181,6 +187,7 @@ final class Native {
     private static final MethodHandle GET_INFO;
     private static final MethodHandle GET_FEATURE_INFO;
     private static final MethodHandle GET_STMT_ATTR;
+    private static final MethodHandle SET_STMT_ATTR;
     private static final MethodHandle GET_DESC_FIELD;
     private static final MethodHandle GET_DESC_REC;
     private static final MethodHandle GET_TYPE_INFO;
@@ -215,6 +222,7 @@ final class Native {
         DESCRIBE_COL = handle(linker, lib, "SQLDescribeCol", JAVA_INT, JAVA_SHORT, ADDRESS,
                 JAVA_SHORT, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS);
         FETCH = handle(linker, lib, "SQLFetch", JAVA_INT);
+        FETCH_SCROLL = handle(linker, lib, "SQLFetchScroll", JAVA_INT, JAVA_SHORT, JAVA_INT);
         GET_DATA = handle(linker, lib, "SQLGetData",
                 JAVA_INT, JAVA_SHORT, JAVA_SHORT, ADDRESS, JAVA_INT, ADDRESS);
         CLOSE_CURSOR = handle(linker, lib, "SQLCloseCursor", JAVA_INT);
@@ -227,6 +235,7 @@ final class Native {
         GET_FEATURE_INFO = handle(linker, lib, "SQLGetFeatureInfo", JAVA_INT, ADDRESS, JAVA_SHORT, ADDRESS,
                 JAVA_SHORT, ADDRESS, JAVA_SHORT, ADDRESS);
         GET_STMT_ATTR = handle(linker, lib, "SQLGetStmtAttr", JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS);
+        SET_STMT_ATTR = handle(linker, lib, "SQLSetStmtAttr", JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT);
         GET_DESC_FIELD = handle(linker, lib, "SQLGetDescField", JAVA_INT, JAVA_SHORT, JAVA_SHORT,
                 ADDRESS, JAVA_INT, ADDRESS);
         GET_DESC_REC = handle(linker, lib, "SQLGetDescRec", JAVA_INT, JAVA_SHORT, ADDRESS, JAVA_SHORT,
@@ -937,6 +946,40 @@ final class Native {
     }
 
     /**
+     * Sets an INTEGER statement attribute (libvsql reads it before
+     * SQLSetStmtAttr returns).
+     */
+    static void setStmtAttr(int stmt, int attribute, int value) throws SQLException {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment v = arena.allocateFrom(JAVA_INT, value);
+            check((short) SET_STMT_ATTR.invokeExact(stmt, attribute, v, 0), SQL_HANDLE_STMT, stmt);
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
+     * Moves a scrollable cursor (see SQLFetchScroll) without reading the row.
+     * It's false if there's no row there.
+     */
+    static boolean scroll(int stmt, short orientation, int offset) throws SQLException {
+        try {
+            short rc = (short) FETCH_SCROLL.invokeExact(stmt, orientation, offset);
+            if (rc == SQL_NO_DATA) {
+                return false;
+            }
+            check(rc, SQL_HANDLE_STMT, stmt);
+            return true;
+        } catch (SQLException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw unexpected(t);
+        }
+    }
+
+    /**
      * Fetcher reads the rows of a cursor. Its buffers are allocated once and
      * reused for every row (rather than an Arena for each row). A larger
      * buffer for a long value (up to KEEP octets) is kept, so that the next
@@ -991,13 +1034,30 @@ final class Native {
          * byte[], or null for a NULL.
          */
         Object[] next() throws SQLException {
+            short rc;
             try {
-                short rc = (short) FETCH.invokeExact(stmt);
-                if (rc == SQL_NO_DATA) {
-                    return null;
-                }
-                check(rc, SQL_HANDLE_STMT, stmt);
+                rc = (short) FETCH.invokeExact(stmt);
+            } catch (Throwable t) {
+                throw unexpected(t);
+            }
+            if (rc == SQL_NO_DATA) {
+                return null;
+            }
+            check(rc, SQL_HANDLE_STMT, stmt);
+            return read();
+        }
 
+        /**
+         * Moves a scrollable cursor (see SQLFetchScroll) and fetches the row,
+         * it's null if there's no row there (see next).
+         */
+        Object[] scroll(short orientation, int offset) throws SQLException {
+            return Native.scroll(stmt, orientation, offset) ? read() : null;
+        }
+
+        /** The row the cursor is on (see next). */
+        private Object[] read() throws SQLException {
+            try {
                 Object[] row = new Object[columns.length];
                 for (int i = 0; i < columns.length; i++) {
                     short n = (short) (i + 1);

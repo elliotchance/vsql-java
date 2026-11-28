@@ -185,6 +185,24 @@ which is cast to the type it's used as. vsql determines the type of each
 parameter from where it's used (such as the type of `x` in `x = ?`), which is
 what `getParameterMetaData()` describes.
 
+## Scrollable result sets
+
+A result set is `TYPE_FORWARD_ONLY` by default: its cursor is closed (which
+commits the statement, with auto-commit on) after the last row. A
+`TYPE_SCROLL_INSENSITIVE` result set can move to any row (with `previous()`,
+`first()`, `last()`, `absolute()`, `relative()` and the others), and its cursor
+is a copy of the result, which doesn't see changes and stays open until the
+result set is closed:
+
+```java
+try (Statement s = conn.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
+        ResultSet rs = s.executeQuery("SELECT x FROM foo ORDER BY x")) {
+    rs.last();
+    System.out.println(rs.getRow() + " rows, the last is " + rs.getInt(1));
+    rs.absolute(-2); // the row before the last
+}
+```
+
 ## Errors
 
 An error from vsql is an `SQLException` with its SQLSTATE (`getSQLState()`),
@@ -223,7 +241,7 @@ format versions of the database (`getFileReadVersion()` and
 
 ## What isn't supported
 
-Scrollable or updatable result sets, generated keys, stored procedures,
+Scroll sensitive or updatable result sets, generated keys, stored procedures,
 `NClob`, statement cancellation (the query timeout isn't used), and the
 `DatabaseMetaData` methods that describe tables (such as `getTables`). These
 throw `SQLFeatureNotSupportedException`.

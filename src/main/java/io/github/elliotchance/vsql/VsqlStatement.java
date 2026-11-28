@@ -12,16 +12,23 @@ import java.util.List;
 /**
  * A statement, see {@link Connection#createStatement()}. It has its own libvsql
  * statement handle (allocated when it's first executed), so it has at most one
- * open result set.
+ * open result set, which is {@link ResultSet#TYPE_FORWARD_ONLY} or
+ * {@link ResultSet#TYPE_SCROLL_INSENSITIVE}.
  */
 public class VsqlStatement extends UnsupportedStatement {
     final VsqlConnection connection;
+    /**
+     * Set by the constructor (or, for a prepared statement, straight after it,
+     * since UnsupportedPreparedStatement only passes the connection).
+     */
+    int resultSetType;
     int stmt;
     private boolean closed;
     private VsqlResultSet resultSet;
     private long updateCount = -1;
     private long maxRows;
     private int fetchSize;
+    private int fetchDirection = ResultSet.FETCH_FORWARD;
     private int queryTimeout;
     private int maxFieldSize;
     private boolean poolable;
@@ -29,7 +36,12 @@ public class VsqlStatement extends UnsupportedStatement {
     private final List<String> batch = new ArrayList<>();
 
     VsqlStatement(VsqlConnection connection) {
+        this(connection, ResultSet.TYPE_FORWARD_ONLY);
+    }
+
+    VsqlStatement(VsqlConnection connection, int resultSetType) {
         this.connection = connection;
+        this.resultSetType = resultSetType;
     }
 
     void check() throws SQLException {
@@ -39,10 +51,17 @@ public class VsqlStatement extends UnsupportedStatement {
         connection.check();
     }
 
-    /** The statement handle, which is allocated when it's first needed. */
+    /**
+     * The statement handle, which is allocated when it's first needed (with a
+     * scrollable, insensitive cursor for TYPE_SCROLL_INSENSITIVE).
+     */
     int handle() throws SQLException {
         if (stmt == 0) {
             stmt = Native.allocHandle(Native.SQL_HANDLE_STMT, Native.SQL_HANDLE_DBC, connection.dbc());
+            if (resultSetType == ResultSet.TYPE_SCROLL_INSENSITIVE) {
+                Native.setStmtAttr(stmt, Native.SQL_ATTR_CURSOR_SCROLLABLE, Native.SQL_SCROLLABLE);
+                Native.setStmtAttr(stmt, Native.SQL_ATTR_CURSOR_SENSITIVITY, Native.SQL_INSENSITIVE);
+            }
         }
         return stmt;
     }
@@ -113,7 +132,7 @@ public class VsqlStatement extends UnsupportedStatement {
         for (int i = 0; i < columns; i++) {
             cs[i] = Native.describeCol(stmt, i + 1);
         }
-        resultSet = new VsqlResultSet(this, cs, maxRows, fetchSize);
+        resultSet = new VsqlResultSet(this, cs, resultSetType, maxRows, fetchSize, fetchDirection);
         return true;
     }
 
@@ -356,10 +375,23 @@ public class VsqlStatement extends UnsupportedStatement {
         return fetchSize;
     }
 
+    /**
+     * The fetch direction is a hint, which vsql doesn't use. It can only be
+     * FETCH_FORWARD for TYPE_FORWARD_ONLY.
+     */
     @Override
     public void setFetchDirection(int direction) throws SQLException {
         check();
-        if (direction != ResultSet.FETCH_FORWARD) {
+        checkFetchDirection(resultSetType, direction);
+        fetchDirection = direction;
+    }
+
+    static void checkFetchDirection(int type, int direction) throws SQLException {
+        if (direction != ResultSet.FETCH_FORWARD && direction != ResultSet.FETCH_REVERSE
+                && direction != ResultSet.FETCH_UNKNOWN) {
+            throw new SQLException("vsql: invalid fetch direction " + direction, "HY024");
+        }
+        if (type == ResultSet.TYPE_FORWARD_ONLY && direction != ResultSet.FETCH_FORWARD) {
             throw Errors.unsupported("a fetch direction other than FETCH_FORWARD");
         }
     }
@@ -367,7 +399,7 @@ public class VsqlStatement extends UnsupportedStatement {
     @Override
     public int getFetchDirection() throws SQLException {
         check();
-        return ResultSet.FETCH_FORWARD;
+        return fetchDirection;
     }
 
     /**
@@ -431,7 +463,7 @@ public class VsqlStatement extends UnsupportedStatement {
     @Override
     public int getResultSetType() throws SQLException {
         check();
-        return ResultSet.TYPE_FORWARD_ONLY;
+        return resultSetType;
     }
 
     @Override

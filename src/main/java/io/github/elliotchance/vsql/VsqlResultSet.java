@@ -35,9 +35,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The rows of a query, see {@link Statement#executeQuery(String)}. It's forward
- * only and read only. Its cursor is closed (which commits the statement, with
- * auto-commit on) after the last row, or when it's closed.
+ * The rows of a query, see {@link Statement#executeQuery(String)}. It's read
+ * only, and {@link ResultSet#TYPE_FORWARD_ONLY} (its cursor is closed, which
+ * commits the statement with auto-commit on, after the last row or when it's
+ * closed) or {@link ResultSet#TYPE_SCROLL_INSENSITIVE} (its cursor is a copy of
+ * the result, which is closed when the result set is closed).
  */
 public final class VsqlResultSet extends UnsupportedResultSet {
     private final VsqlStatement statement;
@@ -49,8 +51,10 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     // Reads the rows of the cursor (with the same buffers for every row), or
     // null for a result set that's made by the driver.
     private final Native.Fetcher fetcher;
+    private final int type;
     private final long maxRows;
     private int fetchSize;
+    private int fetchDirection = ResultSet.FETCH_FORWARD;
     private boolean open = true;
     private boolean closed;
     private boolean done;
@@ -66,15 +70,23 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     // null if there are no rows), and next returns.
     private boolean lookedAhead;
     private Object[] ahead;
+    // A scrollable result set is after the last row (rather than at
+    // rowNumber), and its number of rows (up to maxRows), or -1 if it isn't
+    // known yet.
+    private boolean afterLast;
+    private long rowCount = -1;
 
-    VsqlResultSet(VsqlStatement statement, Column[] columns, long maxRows, int fetchSize) {
+    VsqlResultSet(VsqlStatement statement, Column[] columns, int type, long maxRows, int fetchSize,
+            int fetchDirection) {
         this.statement = statement;
         this.lock = statement.connection;
         this.columns = columns;
         this.rows = null;
         this.fetcher = new Native.Fetcher(statement.stmt, columns);
+        this.type = type;
         this.maxRows = maxRows;
         this.fetchSize = fetchSize;
+        this.fetchDirection = fetchDirection;
     }
 
     /**
@@ -88,6 +100,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         this.columns = columns;
         this.rows = rows.iterator();
         this.fetcher = null;
+        this.type = ResultSet.TYPE_FORWARD_ONLY;
         this.maxRows = 0;
     }
 
@@ -142,6 +155,9 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     public boolean next() throws SQLException {
         synchronized (lock) {
             check();
+            if (scrollable()) {
+                return !afterLast && moveTo(rowNumber + 1);
+            }
             row = null;
             parsed = null;
             if (lookedAhead) {
@@ -159,6 +175,159 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         }
     }
 
+    private boolean scrollable() {
+        return type == ResultSet.TYPE_SCROLL_INSENSITIVE;
+    }
+
+    private void checkScrollable() throws SQLException {
+        if (!scrollable()) {
+            throw new SQLException("vsql: the result set is TYPE_FORWARD_ONLY", "HY106");
+        }
+    }
+
+    /**
+     * Moves a scrollable cursor to row k (from 1). It's before the first row
+     * if k is less than 1, or after the last row if there's no row k (or it's
+     * after max rows).
+     */
+    private boolean moveTo(long k) throws SQLException {
+        row = null;
+        parsed = null;
+        rowNumber = 0;
+        afterLast = false;
+        if (k < 1) {
+            return false;
+        }
+        if (k > Integer.MAX_VALUE || (maxRows > 0 && k > maxRows) || (rowCount >= 0 && k > rowCount)) {
+            afterLast = true;
+            return false;
+        }
+        row = fetcher.scroll(Native.SQL_FETCH_ABSOLUTE, (int) k);
+        if (row == null) {
+            afterLast = true;
+            return false;
+        }
+        rowNumber = k;
+        return true;
+    }
+
+    /**
+     * The number of rows of a scrollable result set (up to max rows). libvsql
+     * doesn't have it, so it's found (once) by moving the cursor to rows with a
+     * binary search, which is why moveTo always moves to an absolute row.
+     */
+    private long rowCount() throws SQLException {
+        if (rowCount < 0) {
+            long limit = maxRows > 0 ? Math.min(maxRows, Integer.MAX_VALUE) : Integer.MAX_VALUE;
+            // There's a row at low (or it's 0), and there isn't one at high
+            // (or it's after the limit).
+            long low = 0;
+            long high = 0;
+            for (long k = 1; high == 0; k *= 2) {
+                if (k > limit) {
+                    high = limit + 1;
+                } else if (Native.scroll(statement.stmt, Native.SQL_FETCH_ABSOLUTE, (int) k)) {
+                    low = k;
+                } else {
+                    high = k;
+                }
+            }
+            while (high - low > 1) {
+                long mid = (low + high) / 2;
+                if (Native.scroll(statement.stmt, Native.SQL_FETCH_ABSOLUTE, (int) mid)) {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            rowCount = low;
+        }
+        return rowCount;
+    }
+
+    /** Moves to the row before (a scrollable result set). */
+    @Override
+    public boolean previous() throws SQLException {
+        synchronized (lock) {
+            check();
+            checkScrollable();
+            return moveTo(afterLast ? rowCount() : rowNumber - 1);
+        }
+    }
+
+    /** Moves to the first row (a scrollable result set). */
+    @Override
+    public boolean first() throws SQLException {
+        synchronized (lock) {
+            check();
+            checkScrollable();
+            return moveTo(1);
+        }
+    }
+
+    /** Moves to the last row (a scrollable result set). */
+    @Override
+    public boolean last() throws SQLException {
+        synchronized (lock) {
+            check();
+            checkScrollable();
+            return moveTo(rowCount());
+        }
+    }
+
+    /** Moves before the first row (a scrollable result set). */
+    @Override
+    public void beforeFirst() throws SQLException {
+        synchronized (lock) {
+            check();
+            checkScrollable();
+            moveTo(0);
+        }
+    }
+
+    /**
+     * Moves after the last row (a scrollable result set). It does nothing if
+     * there are no rows.
+     */
+    @Override
+    public void afterLast() throws SQLException {
+        synchronized (lock) {
+            check();
+            checkScrollable();
+            if (rowCount() > 0) {
+                row = null;
+                rowNumber = 0;
+                afterLast = true;
+            }
+        }
+    }
+
+    /**
+     * Moves to a row (a scrollable result set): from the first row (1), or
+     * from the last row if it's negative (-1). 0 is before the first row.
+     */
+    @Override
+    public boolean absolute(int n) throws SQLException {
+        synchronized (lock) {
+            check();
+            checkScrollable();
+            return moveTo(n >= 0 ? n : rowCount() + n + 1);
+        }
+    }
+
+    /**
+     * Moves a number of rows forward (or back, if it's negative) from the
+     * current position (a scrollable result set).
+     */
+    @Override
+    public boolean relative(int n) throws SQLException {
+        synchronized (lock) {
+            check();
+            checkScrollable();
+            return moveTo((afterLast ? rowCount() + 1 : rowNumber) + n);
+        }
+    }
+
     /**
      * Whether next hasn't been called and there's at least one row. Before
      * next is called, it fetches the first row (which next returns), so it's
@@ -169,6 +338,9 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     public boolean isBeforeFirst() throws SQLException {
         synchronized (lock) {
             check();
+            if (scrollable()) {
+                return row == null && !afterLast && rowCount() > 0;
+            }
             if (rowNumber > 0) {
                 return false;
             }
@@ -188,6 +360,9 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     public boolean isAfterLast() throws SQLException {
         synchronized (lock) {
             check();
+            if (scrollable()) {
+                return afterLast && rowCount() > 0;
+            }
             return done && row == null && rowNumber > 0;
         }
     }
@@ -198,6 +373,18 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         synchronized (lock) {
             check();
             return row != null && rowNumber == 1;
+        }
+    }
+
+    /** Only for a scrollable result set. */
+    @Override
+    public boolean isLast() throws SQLException {
+        synchronized (lock) {
+            check();
+            if (!scrollable()) {
+                return super.isLast();
+            }
+            return row != null && rowNumber == rowCount();
         }
     }
 
@@ -922,7 +1109,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     @Override
     public int getType() throws SQLException {
         check();
-        return ResultSet.TYPE_FORWARD_ONLY;
+        return type;
     }
 
     @Override
@@ -940,15 +1127,18 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     @Override
     public int getFetchDirection() throws SQLException {
         check();
-        return ResultSet.FETCH_FORWARD;
+        return fetchDirection;
     }
 
+    /**
+     * The fetch direction is a hint, which vsql doesn't use. It can only be
+     * FETCH_FORWARD for TYPE_FORWARD_ONLY.
+     */
     @Override
     public void setFetchDirection(int direction) throws SQLException {
         check();
-        if (direction != ResultSet.FETCH_FORWARD) {
-            throw Errors.unsupported("a fetch direction other than FETCH_FORWARD");
-        }
+        VsqlStatement.checkFetchDirection(type, direction);
+        fetchDirection = direction;
     }
 
     /** The fetch size is a hint, which vsql doesn't use. */

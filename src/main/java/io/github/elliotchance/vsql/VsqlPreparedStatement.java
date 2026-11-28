@@ -35,8 +35,9 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     // The value of each parameter, or null if it isn't set.
     private Param[] params;
 
-    VsqlPreparedStatement(VsqlConnection connection, String sql) throws SQLException {
+    VsqlPreparedStatement(VsqlConnection connection, String sql, int resultSetType) throws SQLException {
         super(connection);
+        this.resultSetType = resultSetType;
         int handle = handle();
         try {
             Native.prepare(handle, sql);
