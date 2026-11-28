@@ -29,6 +29,9 @@ public class VsqlStatement extends UnsupportedStatement {
     private long maxRows;
     private int fetchSize;
     private int fetchDirection = ResultSet.FETCH_FORWARD;
+    // Whether setCursorName named the cursor, so a positioned UPDATE or
+    // DELETE can use it (and so it doesn't read rowsets, see VsqlResultSet).
+    boolean named;
     private int queryTimeout;
     private int maxFieldSize;
     private boolean poolable;
@@ -451,6 +454,7 @@ public class VsqlStatement extends UnsupportedStatement {
         synchronized (connection) {
             check();
             Native.setCursorName(handle(), name);
+            named = true;
         }
     }
 

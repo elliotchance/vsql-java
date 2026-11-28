@@ -188,7 +188,13 @@ what `getParameterMetaData()` describes.
 ## Scrollable result sets
 
 A result set is `TYPE_FORWARD_ONLY` by default: its cursor is closed (which
-commits the statement, with auto-commit on) after the last row. A
+commits the statement, with auto-commit on) after the last row. It reads the
+rows in rowsets of the statement's fetch size (`setFetchSize`, or 64 rows if
+it's 0), each with one call to libvsql, unless a column can be longer than
+4096 octets (such as a `CLOB` or `BLOB`), which is read one row at a time.
+A cursor named with `setCursorName` is read one row at a time too, so that a
+positioned `UPDATE` or `DELETE` changes the current row. Set the fetch size to
+1 to use the name from `getCursorName()` (`SQL_CUR...`) that way. A
 `TYPE_SCROLL_INSENSITIVE` result set can move to any row (with `previous()`,
 `first()`, `last()`, `absolute()`, `relative()` and the others), and its cursor
 is a copy of the result, which doesn't see changes and stays open until the

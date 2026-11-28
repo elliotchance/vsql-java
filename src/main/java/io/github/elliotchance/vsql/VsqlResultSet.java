@@ -48,8 +48,9 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     // The rows of a result set that's made by the driver (rather than a
     // cursor), or null.
     private final Iterator<Object[]> rows;
-    // Reads the rows of the cursor (with the same buffers for every row), or
-    // null for a result set that's made by the driver.
+    // Reads the rows of the cursor (with the same buffers for every row, and
+    // in rowsets of up to the fetch size if it's forward only), or null for a
+    // result set that's made by the driver.
     private final Native.Fetcher fetcher;
     private final int type;
     private final long maxRows;
@@ -82,7 +83,8 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         this.lock = statement.connection;
         this.columns = columns;
         this.rows = null;
-        this.fetcher = new Native.Fetcher(statement.stmt, columns);
+        this.fetcher = new Native.Fetcher(statement.stmt, columns,
+                type == ResultSet.TYPE_FORWARD_ONLY && !statement.named ? rowset(fetchSize, maxRows) : 0);
         this.type = type;
         this.maxRows = maxRows;
         this.fetchSize = fetchSize;
@@ -104,6 +106,19 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         this.maxRows = 0;
     }
 
+    /**
+     * The number of rows that each fetch reads: the fetch size (or
+     * Native.Fetcher.ROWSET if it isn't set), but no more than max rows. The
+     * cursor is on the first row of a rowset (which is the current row of a
+     * positioned UPDATE or DELETE), and libvsql can only move it to another
+     * row of the rowset if it's scrollable, so a cursor that's named with
+     * setCursorName reads one row at a time.
+     */
+    static int rowset(int fetchSize, long maxRows) {
+        long rows = fetchSize > 0 ? fetchSize : Native.Fetcher.ROWSET;
+        return (int) (maxRows > 0 ? Math.min(rows, maxRows) : rows);
+    }
+
     private void check() throws SQLException {
         if (closed) {
             throw Errors.closed("result set");
@@ -114,7 +129,11 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (open) {
             open = false;
             if (rows == null) {
-                Native.closeCursor(statement.stmt);
+                try {
+                    fetcher.unbind();
+                } finally {
+                    Native.closeCursor(statement.stmt);
+                }
             }
         }
     }
@@ -1141,7 +1160,11 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         fetchDirection = direction;
     }
 
-    /** The fetch size is a hint, which vsql doesn't use. */
+    /**
+     * The fetch size is a hint. The fetch size of the statement is the number
+     * of rows that a forward only result set reads at a time (see
+     * Statement.setFetchSize), but changing it here doesn't change that.
+     */
     @Override
     public void setFetchSize(int rows) throws SQLException {
         check();
