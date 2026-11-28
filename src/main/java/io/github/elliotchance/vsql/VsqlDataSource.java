@@ -84,11 +84,11 @@ public final class VsqlDataSource implements DataSource {
     @Override
     public Connection getConnection() throws SQLException {
         if (url == null) {
-            throw new SQLException("vsql: the data source has no URL", "08001");
+            throw Errors.sql("08001", "vsql: the data source has no URL");
         }
         Connection conn = new VsqlDriver().connect(url, properties);
         if (conn == null) {
-            throw new SQLException("vsql: " + url + " isn't a vsql URL (jdbc:vsql:...)", "08001");
+            throw Errors.sql("08001", "vsql: " + url + " isn't a vsql URL (jdbc:vsql:...)");
         }
         return conn;
     }
@@ -129,7 +129,7 @@ public final class VsqlDataSource implements DataSource {
         if (iface.isInstance(this)) {
             return iface.cast(this);
         }
-        throw new SQLException("vsql: not a wrapper for " + iface.getName(), "HY000");
+        throw Errors.sql("HY000", "vsql: not a wrapper for " + iface.getName());
     }
 
     @Override

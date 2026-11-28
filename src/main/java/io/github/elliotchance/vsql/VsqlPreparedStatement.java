@@ -52,8 +52,8 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         synchronized (connection) {
             check();
             if (index < 1 || index > parameters.length) {
-                throw new SQLException("vsql: invalid parameter index " + index + ", the statement has "
-                        + parameters.length + " parameter" + (parameters.length == 1 ? "" : "s"), "07009");
+                throw Errors.sql("07009", "vsql: invalid parameter index " + index + ", the statement has "
+                        + parameters.length + " parameter" + (parameters.length == 1 ? "" : "s"));
             }
             params[index - 1] = param;
         }
@@ -67,7 +67,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     private Param[] params() throws SQLException {
         for (int i = 0; i < params.length; i++) {
             if (params[i] == null) {
-                throw new SQLException("vsql: parameter " + (i + 1) + " isn't set", "07002");
+                throw Errors.sql("07002", "vsql: parameter " + (i + 1) + " isn't set");
             }
         }
         return params.clone();
@@ -95,7 +95,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     public ResultSet executeQuery() throws SQLException {
         synchronized (connection) {
             if (!execute()) {
-                throw new SQLException("vsql: the statement isn't a query", "07000");
+                throw Errors.sql("07000", "vsql: the statement isn't a query");
             }
             return getResultSet();
         }
@@ -111,7 +111,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         synchronized (connection) {
             if (execute()) {
                 discardResultSet();
-                throw new SQLException("vsql: the statement is a query", "07000");
+                throw Errors.sql("07000", "vsql: the statement is a query");
             }
             return getLargeUpdateCount();
         }
@@ -153,7 +153,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
                 try {
                     if (run(sets.get(i))) {
                         discardResultSet();
-                        throw new SQLException("vsql: the statement is a query", "07000");
+                        throw Errors.sql("07000", "vsql: the statement is a query");
                     }
                     counts[i] = getLargeUpdateCount();
                 } catch (SQLException e) {
@@ -167,7 +167,7 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
     // The Statement methods with SQL can't be used with a PreparedStatement.
 
     private static SQLException withSql() {
-        return new SQLException("vsql: a PreparedStatement can't execute other SQL", "HY000");
+        return Errors.sql("HY000", "vsql: a PreparedStatement can't execute other SQL");
     }
 
     @Override
@@ -414,15 +414,15 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
                 return in.readAllBytes();
             }
             if (length > Integer.MAX_VALUE) {
-                throw new SQLException("vsql: the stream is too long", "22001");
+                throw Errors.sql("22001", "vsql: the stream is too long");
             }
             byte[] b = in.readNBytes((int) length);
             if (b.length < length) {
-                throw new SQLException("vsql: the stream has fewer than " + length + " octets", "22023");
+                throw Errors.sql("22023", "vsql: the stream has fewer than " + length + " octets");
             }
             return b;
         } catch (IOException e) {
-            throw new SQLException("vsql: can't read the stream: " + e.getMessage(), "HY000", e);
+            throw Errors.sql("HY000", "vsql: can't read the stream: " + e.getMessage(), e);
         }
     }
 
@@ -435,20 +435,20 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
                 return w.toString();
             }
             if (length > Integer.MAX_VALUE) {
-                throw new SQLException("vsql: the reader is too long", "22001");
+                throw Errors.sql("22001", "vsql: the reader is too long");
             }
             char[] buf = new char[(int) length];
             int n = 0;
             while (n < buf.length) {
                 int r = in.read(buf, n, buf.length - n);
                 if (r < 0) {
-                    throw new SQLException("vsql: the reader has fewer than " + length + " chars", "22023");
+                    throw Errors.sql("22023", "vsql: the reader has fewer than " + length + " chars");
                 }
                 n += r;
             }
             return new String(buf);
         } catch (IOException e) {
-            throw new SQLException("vsql: can't read the reader: " + e.getMessage(), "HY000", e);
+            throw Errors.sql("HY000", "vsql: can't read the reader: " + e.getMessage(), e);
         }
     }
 

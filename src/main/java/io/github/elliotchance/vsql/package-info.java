@@ -102,6 +102,8 @@
  * SQLIntegrityConstraintViolationException for 23. It also implements
  * {@link io.github.elliotchance.vsql.VsqlException}, with the diagnostic
  * fields that JDBC doesn't have (such as the name of a violated constraint),
- * and each diagnostic after the first is chained to it.
+ * and each diagnostic after the first is chained to it. The driver's own
+ * errors (such as SQLDataException for getInt of a string that isn't a
+ * number) are the same subclasses, without the diagnostics.
  */
 package io.github.elliotchance.vsql;

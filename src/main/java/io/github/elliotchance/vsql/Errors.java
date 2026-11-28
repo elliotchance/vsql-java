@@ -37,6 +37,13 @@ final class Errors {
         };
     }
 
+    /** An error that the driver makes, caused by another exception. */
+    static SQLException sql(String sqlstate, String message, Throwable cause) {
+        SQLException e = sql(sqlstate, message);
+        e.initCause(cause);
+        return e;
+    }
+
     /** An error from libvsql, with its diagnostics. */
     static SQLException sql(String sqlstate, String message, VsqlDiagnostics d) {
         String cls = sqlstate.length() >= 2 ? sqlstate.substring(0, 2) : sqlstate;

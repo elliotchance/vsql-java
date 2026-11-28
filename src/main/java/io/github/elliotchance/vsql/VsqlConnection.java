@@ -146,7 +146,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     private synchronized void end(boolean commit) throws SQLException {
         check();
         if (autoCommit) {
-            throw new SQLException("vsql: there's no transaction with auto-commit on", "25000");
+            throw Errors.sql("25000", "vsql: there's no transaction with auto-commit on");
         }
         if (!inTransaction) {
             return;
@@ -177,7 +177,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     @Override
     public synchronized Savepoint setSavepoint(String name) throws SQLException {
         if (name == null) {
-            throw new SQLException("vsql: the savepoint name can't be null", "HY009");
+            throw Errors.sql("HY009", "vsql: the savepoint name can't be null");
         }
         return newSavepoint(name);
     }
@@ -185,7 +185,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     private Savepoint newSavepoint(String name) throws SQLException {
         check();
         if (autoCommit) {
-            throw new SQLException("vsql: there are no savepoints with auto-commit on", "25000");
+            throw Errors.sql("25000", "vsql: there are no savepoints with auto-commit on");
         }
         begin();
         VsqlSavepoint savepoint = new VsqlSavepoint(this, ++savepoints, name);
@@ -228,10 +228,10 @@ public final class VsqlConnection extends UnsupportedConnection {
     private VsqlSavepoint savepoint(Savepoint savepoint) throws SQLException {
         check();
         if (autoCommit) {
-            throw new SQLException("vsql: there are no savepoints with auto-commit on", "25000");
+            throw Errors.sql("25000", "vsql: there are no savepoints with auto-commit on");
         }
         if (!(savepoint instanceof VsqlSavepoint s) || s.connection != this) {
-            throw new SQLException("vsql: the savepoint isn't from this connection", "3B001");
+            throw Errors.sql("3B001", "vsql: the savepoint isn't from this connection");
         }
         return s;
     }
@@ -312,13 +312,13 @@ public final class VsqlConnection extends UnsupportedConnection {
                 notInTransaction("isolation level");
                 isolation = level;
             }
-            default -> throw new SQLException("vsql: invalid isolation level " + level, "HY024");
+            default -> throw Errors.sql("HY024", "vsql: invalid isolation level " + level);
         }
     }
 
     private void notInTransaction(String what) throws SQLException {
         if (inTransaction) {
-            throw new SQLException("vsql: the " + what + " can't be changed during a transaction", "25001");
+            throw Errors.sql("25001", "vsql: the " + what + " can't be changed during a transaction");
         }
     }
 
@@ -435,7 +435,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     @Override
     public synchronized boolean isValid(int timeout) throws SQLException {
         if (timeout < 0) {
-            throw new SQLException("vsql: the timeout can't be negative", "HY092");
+            throw Errors.sql("HY092", "vsql: the timeout can't be negative");
         }
         return !closed;
     }
@@ -504,7 +504,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     @Override
     public void abort(Executor executor) throws SQLException {
         if (executor == null) {
-            throw new SQLException("vsql: the executor can't be null", "HY009");
+            throw Errors.sql("HY009", "vsql: the executor can't be null");
         }
         close();
     }
@@ -534,7 +534,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     public synchronized void setCatalog(String catalog) throws SQLException {
         check();
         if (catalog == null) {
-            throw new SQLException("vsql: the catalog can't be null", "HY009");
+            throw Errors.sql("HY009", "vsql: the catalog can't be null");
         }
         execute("SET CATALOG " + literal(catalog));
     }
@@ -559,7 +559,7 @@ public final class VsqlConnection extends UnsupportedConnection {
     public synchronized void setSchema(String schema) throws SQLException {
         check();
         if (schema == null) {
-            throw new SQLException("vsql: the schema can't be null", "HY009");
+            throw Errors.sql("HY009", "vsql: the schema can't be null");
         }
         // The value of SET SCHEMA is a schema name, so it's delimited to be
         // exactly the name.
@@ -625,7 +625,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         if (iface.isInstance(this)) {
             return iface.cast(this);
         }
-        throw new SQLException("vsql: not a wrapper for " + iface.getName(), "HY000");
+        throw Errors.sql("HY000", "vsql: not a wrapper for " + iface.getName());
     }
 
     @Override

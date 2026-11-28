@@ -78,7 +78,7 @@ public final class VsqlDriver implements Driver {
         }
         ConnectionProperties properties = new ConnectionProperties(url, info);
         if (properties.database.isEmpty()) {
-            throw new SQLException("vsql: the URL has no database (such as jdbc:vsql:test.vsql)", "08001");
+            throw Errors.sql("08001", "vsql: the URL has no database (such as jdbc:vsql:test.vsql)");
         }
 
         VsqlConnection conn = new VsqlConnection(url, properties.database);

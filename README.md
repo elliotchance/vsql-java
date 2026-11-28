@@ -191,7 +191,9 @@ An error from vsql is an `SQLException` with its SQLSTATE (`getSQLState()`),
 as the JDBC subclass for the SQLSTATE's class, such as `SQLSyntaxErrorException`
 for `42` (`42P01` is an undefined table) and
 `SQLIntegrityConstraintViolationException` for `23`. Each diagnostic after the
-first is chained to it (`getNextException()`).
+first is chained to it (`getNextException()`). The driver's own errors are the
+same subclasses, so `catch (SQLDataException e)` catches a `22018` from
+`getInt` of a string that isn't a number as well as one from vsql.
 
 It also implements `VsqlException`, whose `getDiagnostics()` has what JDBC
 doesn't: the violated constraint, its table, an unknown column, an invalid
