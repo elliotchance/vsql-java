@@ -19,15 +19,27 @@ final class Version {
     static final String LIBVSQL = libvsql();
 
     private static String driver() {
-        String v = Version.class.getPackage().getImplementationVersion();
+        return driver(Version.class.getPackage().getImplementationVersion());
+    }
+
+    /** The version of the jar, v is null if it isn't known. */
+    static String driver(String v) {
         return v == null ? "0.0.0" : v;
     }
 
     private static String libvsql() {
-        try (InputStream in = Version.class.getResourceAsStream("libvsql-version")) {
-            if (in == null) {
-                return "0.0.0";
-            }
+        return libvsql(Version.class.getResourceAsStream("libvsql-version"));
+    }
+
+    /**
+     * The version in libvsql-version (in is null if there isn't one), without
+     * the "v".
+     */
+    static String libvsql(InputStream in) {
+        if (in == null) {
+            return "0.0.0";
+        }
+        try (in) {
             String v = new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
             return v.startsWith("v") ? v.substring(1) : v;
         } catch (IOException e) {

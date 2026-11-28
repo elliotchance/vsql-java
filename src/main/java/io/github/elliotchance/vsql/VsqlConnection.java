@@ -60,25 +60,16 @@ public final class VsqlConnection extends UnsupportedConnection {
         env = Native.allocEnv();
         try {
             dbc = Native.allocHandle(Native.SQL_HANDLE_DBC, Native.SQL_HANDLE_ENV, env);
-        } catch (SQLException e) {
-            Native.freeHandle(Native.SQL_HANDLE_ENV, env);
-            throw e;
-        }
-        try {
             Native.connect(dbc, database);
+            // Each statement is committed when it finishes, unless it's in a
+            // transaction started by begin.
+            Native.setAutocommitOn(dbc);
         } catch (SQLException e) {
-            Native.freeHandle(Native.SQL_HANDLE_DBC, dbc);
-            Native.freeHandle(Native.SQL_HANDLE_ENV, env);
-            throw e;
-        }
-
-        // Each statement is committed when it finishes, unless it's in a
-        // transaction started by begin.
-        try {
-            Native.setAutocommit(dbc, true);
-        } catch (SQLException e) {
-            close();
-            throw e;
+            // The handles are freed (it isn't connected), and their errors
+            // are chained to e.
+            closed = true;
+            throw run(e, () -> Native.freeHandle(Native.SQL_HANDLE_DBC, dbc),
+                    () -> Native.freeHandle(Native.SQL_HANDLE_ENV, env));
         }
     }
 
@@ -122,15 +113,9 @@ public final class VsqlConnection extends UnsupportedConnection {
      * commit it by itself.
      */
     synchronized void statementEnded() {
-        if (!inTransaction || closed) {
-            return;
-        }
-        try {
-            if (!Native.transactionActive(dbc)) {
-                inTransaction = false;
-            }
-        } catch (SQLException e) {
-            // The transaction is assumed to still be active, as it was.
+        // A closed connection isn't in a transaction.
+        if (inTransaction && !Native.transactionActive(dbc)) {
+            inTransaction = false;
         }
     }
 
@@ -214,7 +199,8 @@ public final class VsqlConnection extends UnsupportedConnection {
             Column[] columns = {Native.describeCol(stmt, 1)};
             Object[] row = new Native.Fetcher(stmt, columns).next();
             Native.closeCursor(stmt);
-            return row == null || row[0] == null ? null : row[0].toString();
+            // It's always one row that isn't NULL.
+            return row[0].toString();
         } finally {
             Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
         }
@@ -466,11 +452,7 @@ public final class VsqlConnection extends UnsupportedConnection {
         // executed as SQL (even with auto-commit on).
         boolean active = inTransaction;
         if (!active) {
-            try {
-                active = Native.transactionActive(dbc);
-            } catch (SQLException e) {
-                error = add(error, e);
-            }
+            active = Native.transactionActive(dbc);
         }
         if (active) {
             inTransaction = false;
@@ -480,20 +462,26 @@ public final class VsqlConnection extends UnsupportedConnection {
                 error = add(error, e);
             }
         }
-        for (Native.Call call : new Native.Call[] {
-                () -> Native.disconnect(dbc),
-                () -> Native.freeHandle(Native.SQL_HANDLE_DBC, dbc),
-                () -> Native.freeHandle(Native.SQL_HANDLE_ENV, env),
-        }) {
+        error = run(error, () -> Native.disconnect(dbc), () -> Native.freeHandle(Native.SQL_HANDLE_DBC, dbc),
+                () -> Native.freeHandle(Native.SQL_HANDLE_ENV, env));
+        if (error != null) {
+            throw error;
+        }
+    }
+
+    /**
+     * Runs each call (even if one fails), and returns error with their errors
+     * added to it (see add).
+     */
+    static SQLException run(SQLException error, Native.Call... calls) {
+        for (Native.Call call : calls) {
             try {
                 call.run();
             } catch (SQLException e) {
                 error = add(error, e);
             }
         }
-        if (error != null) {
-            throw error;
-        }
+        return error;
     }
 
     private static SQLException add(SQLException error, SQLException e) {

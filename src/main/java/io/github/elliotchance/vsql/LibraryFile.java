@@ -14,7 +14,9 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -54,15 +56,15 @@ final class LibraryFile {
      */
     static Path extract(Path base, String file, byte[] library) {
         String checksum = sha256(library);
-        IOException shared;
+        // The error from the shared folder, if there was one.
+        List<IOException> shared = new ArrayList<>(1);
         try {
             Path path = extractShared(sharedFolder(base, checksum), file, library, checksum);
             if (path != null) {
                 return path;
             }
-            shared = null;
         } catch (IOException e) {
-            shared = e;
+            shared.add(e);
         }
 
         // The shared folder can't be used, so the library goes in a new folder
@@ -78,9 +80,7 @@ final class LibraryFile {
             path.toFile().deleteOnExit();
             return path;
         } catch (IOException e) {
-            if (shared != null) {
-                e.addSuppressed(shared);
-            }
+            shared.forEach(e::addSuppressed);
             throw new UncheckedIOException("vsql: can't write libvsql to " + base, e);
         }
     }
@@ -133,11 +133,11 @@ final class LibraryFile {
             Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             // Another JVM wrote it first (and on Windows, it can't be replaced
-            // while it's loaded).
+            // while it's loaded), which is checked below.
             Files.deleteIfExists(tmp);
-            if (!isUsable(path, posix, user, checksum)) {
-                throw e;
-            }
+        }
+        if (!isUsable(path, posix, user, checksum)) {
+            throw new IOException("vsql: can't write " + path);
         }
 
         return path;
@@ -155,7 +155,7 @@ final class LibraryFile {
      * is owned by user, and can't be written by the group or others. It's
      * false if path doesn't exist.
      */
-    private static boolean isSafe(Path path, UserPrincipal user, boolean folder) throws IOException {
+    static boolean isSafe(Path path, UserPrincipal user, boolean folder) throws IOException {
         PosixFileAttributes attrs;
         try {
             attrs = Files.readAttributes(path, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
@@ -177,8 +177,19 @@ final class LibraryFile {
      * @return 64 hex digits
      */
     static String sha256(byte[] data) {
+        return digest("SHA-256", data);
+    }
+
+    /**
+     * The digest of data, in hex.
+     *
+     * @param algorithm the MessageDigest algorithm, such as SHA-256
+     * @param data the data
+     * @return the digest in hex
+     */
+    static String digest(String algorithm, byte[] data) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(data));
+            return HexFormat.of().formatHex(MessageDigest.getInstance(algorithm).digest(data));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }

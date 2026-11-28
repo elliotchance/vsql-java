@@ -19,7 +19,7 @@ final class Errors {
     }
 
     static SQLException sql(String sqlstate, String message) {
-        String cls = sqlstate.length() >= 2 ? sqlstate.substring(0, 2) : sqlstate;
+        String cls = sqlstate.substring(0, 2);
         if (sqlstate.equals("HYC00")) {
             // Optional feature not implemented.
             return new SQLFeatureNotSupportedException(message, sqlstate);
@@ -46,7 +46,7 @@ final class Errors {
 
     /** An error from libvsql, with its diagnostics. */
     static SQLException sql(String sqlstate, String message, VsqlDiagnostics d) {
-        String cls = sqlstate.length() >= 2 ? sqlstate.substring(0, 2) : sqlstate;
+        String cls = sqlstate.substring(0, 2);
         if (sqlstate.equals("HYC00")) {
             return new FeatureNotSupported(message, sqlstate, d);
         }

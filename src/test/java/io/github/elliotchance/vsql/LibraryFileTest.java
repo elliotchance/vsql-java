@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.nio.file.attribute.UserPrincipal;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -141,5 +142,28 @@ class LibraryFileTest {
     void cantBeWritten() throws IOException {
         Path base = Files.write(tmp.resolve("not a folder"), OTHER);
         assertThrows(UncheckedIOException.class, () -> LibraryFile.extract(base, FILE, LIBRARY));
+    }
+
+    /** The file can't be written to the shared folder, so it's in a new one. */
+    @Test
+    void fileCantBeWritten() throws IOException {
+        Path file = shared().resolve(FILE);
+        Files.createDirectories(file.resolve("x"));
+        assertPrivateFolder(LibraryFile.extract(tmp, FILE, LIBRARY));
+    }
+
+    @Test
+    void otherOwnerIsNotSafe() throws IOException {
+        assumePosix();
+        Path dir = Files.createDirectory(tmp.resolve("dir"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        String other = System.getProperty("user.name").equals("nobody") ? "root" : "nobody";
+        UserPrincipal user = tmp.getFileSystem().getUserPrincipalLookupService().lookupPrincipalByName(other);
+        assertFalse(LibraryFile.isSafe(dir, user, true));
+    }
+
+    @Test
+    void unknownDigest() {
+        assertThrows(IllegalStateException.class, () -> LibraryFile.digest("nope", LIBRARY));
     }
 }

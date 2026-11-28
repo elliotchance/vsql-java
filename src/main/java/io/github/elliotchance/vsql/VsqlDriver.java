@@ -50,8 +50,13 @@ public final class VsqlDriver implements Driver {
     public static final String PREFIX = "jdbc:vsql:";
 
     static {
+        register(() -> DriverManager.registerDriver(new VsqlDriver()));
+    }
+
+    /** Registers the driver, see the static initializer. */
+    static void register(Native.Call registration) {
         try {
-            DriverManager.registerDriver(new VsqlDriver());
+            registration.run();
         } catch (SQLException e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -82,7 +87,7 @@ public final class VsqlDriver implements Driver {
         }
 
         VsqlConnection conn = new VsqlConnection(url, properties.database);
-        try {
+        return configure(conn, () -> {
             if (properties.has(ConnectionProperties.AUTO_COMMIT)) {
                 conn.setAutoCommit(properties.autoCommit());
             }
@@ -92,13 +97,19 @@ public final class VsqlDriver implements Driver {
             if (properties.has(ConnectionProperties.TRANSACTION_ISOLATION)) {
                 conn.setTransactionIsolation(properties.transactionIsolation());
             }
+        });
+    }
+
+    /**
+     * Sets the connection properties of a new connection, which is closed if
+     * that fails (the values were checked before connecting, so it's only if
+     * libvsql fails).
+     */
+    static VsqlConnection configure(VsqlConnection conn, Native.Call settings) throws SQLException {
+        try {
+            settings.run();
         } catch (SQLException e) {
-            try {
-                conn.close();
-            } catch (SQLException closeError) {
-                e.setNextException(closeError);
-            }
-            throw e;
+            throw VsqlConnection.run(e, conn::close);
         }
         return conn;
     }

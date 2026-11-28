@@ -138,10 +138,13 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             }
         } catch (SQLException e) {
             done = true;
-            closeCursor();
-            if (statement != null) {
-                statement.connection.statementEnded();
+            try {
+                closeCursor();
+            } catch (SQLException c) {
+                e.addSuppressed(c);
             }
+            // Only a cursor (of a statement) can fail.
+            statement.connection.statementEnded();
             throw e;
         }
         if (r == null) {
@@ -363,7 +366,8 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             if (scrollable()) {
                 return afterLast && rowCount() > 0;
             }
-            return done && row == null && rowNumber > 0;
+            // The row is null when it's done.
+            return done && rowNumber > 0;
         }
     }
 
@@ -382,7 +386,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         synchronized (lock) {
             check();
             if (!scrollable()) {
-                return super.isLast();
+                throw Errors.unsupported("ResultSet.isLast");
             }
             return row != null && rowNumber == rowCount();
         }
@@ -482,6 +486,11 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             case byte[] b -> HexFormat.of().withUpperCase().formatHex(b);
             default -> v.toString();
         };
+    }
+
+    /** Parses the string of a datetime, see Values. */
+    private interface Parser {
+        Object parse(String s) throws SQLException;
     }
 
     private static boolean isDatetime(int jdbcType) {
@@ -658,11 +667,9 @@ public final class VsqlResultSet extends UnsupportedResultSet {
      * (the others).
      */
     private Object interval(int index) throws SQLException {
+        // It's never NULL, see getObject.
         Object v = value(index);
         Column c = column(index);
-        if (v == null) {
-            return null;
-        }
         if (!c.isInterval()) {
             throw cantConvert(c, "interval");
         }
@@ -687,22 +694,20 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             return null;
         }
         Column c = column(index);
-        if (!isDatetime(c.jdbcType())) {
-            throw cantConvert(c, "date or time");
-        }
+        Parser parser = switch (c.jdbcType()) {
+            case java.sql.Types.DATE -> Values::parseDate;
+            case java.sql.Types.TIME -> Values::parseTime;
+            case java.sql.Types.TIME_WITH_TIMEZONE -> Values::parseTimeWithTimeZone;
+            case java.sql.Types.TIMESTAMP -> Values::parseTimestamp;
+            case java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> Values::parseTimestampWithTimeZone;
+            default -> throw cantConvert(c, "date or time");
+        };
         Object p = parsed(index);
         if (p != null) {
             return p;
         }
-        String s = (String) (v instanceof String ? v : null);
-        Object t = switch (c.jdbcType()) {
-            case java.sql.Types.DATE -> Values.parseDate(s);
-            case java.sql.Types.TIME -> Values.parseTime(s);
-            case java.sql.Types.TIME_WITH_TIMEZONE -> Values.parseTimeWithTimeZone(s);
-            case java.sql.Types.TIMESTAMP -> Values.parseTimestamp(s);
-            case java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> Values.parseTimestampWithTimeZone(s);
-            default -> throw cantConvert(c, "date or time");
-        };
+        // A datetime is always read as a string.
+        Object t = parser.parse((String) v);
         keep(index, t);
         return t;
     }
@@ -712,15 +717,16 @@ public final class VsqlResultSet extends UnsupportedResultSet {
      * zone, and a TIME WITH TIME ZONE is on 1970-01-01 (so it can be a day
      * either side of it in the zone).
      */
-    private LocalDateTime localDateTime(int index, ZoneId zone, String to) throws SQLException {
-        return switch (temporal(index)) {
+    private LocalDateTime localDateTime(int index, ZoneId zone) throws SQLException {
+        Object t = temporal(index);
+        return switch (t) {
             case null -> null;
             case LocalDate d -> d.atStartOfDay();
-            case LocalDateTime t -> t;
-            case OffsetDateTime t -> t.atZoneSameInstant(zone).toLocalDateTime();
-            case LocalTime t -> LocalDate.EPOCH.atTime(t);
-            case OffsetTime t -> LocalDate.EPOCH.atTime(t).atZoneSameInstant(zone).toLocalDateTime();
-            default -> throw cantConvert(column(index), to);
+            case LocalDateTime d -> d;
+            case OffsetDateTime d -> d.atZoneSameInstant(zone).toLocalDateTime();
+            case LocalTime d -> LocalDate.EPOCH.atTime(d);
+            // An OffsetTime (see temporal).
+            default -> LocalDate.EPOCH.atTime((OffsetTime) t).atZoneSameInstant(zone).toLocalDateTime();
         };
     }
 
@@ -730,7 +736,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (t instanceof LocalTime || t instanceof OffsetTime) {
             throw cantConvert(column(index), "Date");
         }
-        LocalDateTime d = localDateTime(index, ZoneId.systemDefault(), "Date");
+        LocalDateTime d = localDateTime(index, ZoneId.systemDefault());
         return d == null ? null : Date.valueOf(d.toLocalDate());
     }
 
@@ -743,7 +749,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (temporal(index) instanceof LocalDate) {
             throw cantConvert(column(index), "Time");
         }
-        LocalDateTime t = localDateTime(index, ZoneId.systemDefault(), "Time");
+        LocalDateTime t = localDateTime(index, ZoneId.systemDefault());
         return t == null ? null : time(t.toLocalTime());
     }
 
@@ -762,17 +768,17 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         return switch (temporal(index)) {
             case null -> null;
             case OffsetDateTime t -> Timestamp.from(t.toInstant());
-            default -> Timestamp.valueOf(localDateTime(index, ZoneId.systemDefault(), "Timestamp"));
+            default -> Timestamp.valueOf(localDateTime(index, ZoneId.systemDefault()));
         };
     }
 
     /** A value without a time zone is in the calendar's time zone. */
-    private Instant instant(int index, Calendar cal, String to) throws SQLException {
+    private Instant instant(int index, Calendar cal) throws SQLException {
         return switch (temporal(index)) {
             case null -> null;
             case OffsetDateTime t -> t.toInstant();
             case OffsetTime t -> LocalDate.EPOCH.atTime(t).toInstant();
-            default -> localDateTime(index, cal.getTimeZone().toZoneId(), to)
+            default -> localDateTime(index, cal.getTimeZone().toZoneId())
                     .atZone(cal.getTimeZone().toZoneId()).toInstant();
         };
     }
@@ -782,7 +788,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (cal == null) {
             return getDate(index);
         }
-        Instant i = instant(index, cal, "Date");
+        Instant i = instant(index, cal);
         return i == null ? null : new Date(i.toEpochMilli());
     }
 
@@ -791,7 +797,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (cal == null) {
             return getTime(index);
         }
-        Instant i = instant(index, cal, "Time");
+        Instant i = instant(index, cal);
         return i == null ? null : new Time(i.toEpochMilli());
     }
 
@@ -800,7 +806,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (cal == null) {
             return getTimestamp(index);
         }
-        Instant i = instant(index, cal, "Timestamp");
+        Instant i = instant(index, cal);
         return i == null ? null : Timestamp.from(i);
     }
 
@@ -899,7 +905,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
                 case LocalDate d when type == LocalDateTime.class -> d.atStartOfDay();
                 case OffsetTime d when type == OffsetTime.class -> d;
                 case OffsetTime d when type == LocalTime.class ->
-                        localDateTime(index, ZoneId.systemDefault(), type.getName()).toLocalTime();
+                        localDateTime(index, ZoneId.systemDefault()).toLocalTime();
                 case OffsetDateTime d when type == OffsetDateTime.class -> d;
                 case OffsetDateTime d when type == ZonedDateTime.class -> d.toZonedDateTime();
                 case OffsetDateTime d when type == Instant.class -> d.toInstant();

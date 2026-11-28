@@ -185,6 +185,8 @@ class ScrollableResultSetTest {
                 assertTrue(rs.absolute(1));
                 assertRow(rs, 1);
                 assertEquals(n == 1, rs.isLast());
+                assertFalse(rs.relative(Integer.MAX_VALUE));
+                assertTrue(rs.isAfterLast());
             }
         }
     }
