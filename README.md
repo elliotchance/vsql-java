@@ -185,6 +185,15 @@ which is cast to the type it's used as. vsql determines the type of each
 parameter from where it's used (such as the type of `x` in `x = ?`), which is
 what `getParameterMetaData()` describes.
 
+`setObject` with a `java.sql.Types` code or a `JDBCType` (and `setNull`)
+sends the value as that type instead (before it's cast to the type it's used
+as). The value is converted to it first (such as the date of a
+`LocalDateTime`, or the string of a number for `VARCHAR`), and
+`scaleOrLength` is the scale of a `DECIMAL` or `NUMERIC` (rounded half up) or
+the length of a string. `Types.OTHER` (the type of an interval) and
+`Types.NULL` send the value as its Java type, and a type that vsql doesn't have
+(such as `ARRAY`) throws `SQLFeatureNotSupportedException`.
+
 ## Scrollable result sets
 
 A result set is `TYPE_FORWARD_ONLY` by default: its cursor is closed (which

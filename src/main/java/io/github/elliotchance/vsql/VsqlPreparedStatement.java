@@ -10,10 +10,12 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Date;
+import java.sql.JDBCType;
 import java.sql.ParameterMetaData;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLType;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
@@ -220,14 +222,20 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         }
     }
 
+    /**
+     * A NULL of the type, see {@link #setObject(int, Object, int)}. A NULL of
+     * {@code Types.NULL} or {@code Types.OTHER} has no type, so it's cast to
+     * the type it's used as.
+     */
     @Override
     public void setNull(int index, int sqlType) throws SQLException {
-        set(index, (Object) null);
+        set(index, Targets.param(null, sqlType, null));
     }
 
+    /** The type name is ignored, see {@link #setNull(int, int)}. */
     @Override
     public void setNull(int index, int sqlType, String typeName) throws SQLException {
-        set(index, (Object) null);
+        setNull(index, sqlType);
     }
 
     @Override
@@ -498,15 +506,67 @@ public final class VsqlPreparedStatement extends UnsupportedPreparedStatement {
         set(index, x);
     }
 
-    /** The value is sent as its Java type, and cast to the type it's used as. */
+    /**
+     * The value is converted to the {@code java.sql.Types} type and sent as
+     * it, then cast to the type it's used as. A string is cast to the type by
+     * vsql, a number to a {@code BOOLEAN} is TRUE if it isn't zero, a
+     * {@code BOOLEAN} to a number is 1 or 0, a value to a character string is
+     * its string (such as "2022-01-02" for a date), and a date and time are
+     * converted to each other (such as the date of a timestamp). A local
+     * datetime sent as a {@code WITH_TIMEZONE} type is in the session's time
+     * zone. A {@code Reader} or {@code InputStream} is read now.
+     *
+     * <p>{@code Types.OTHER} (the type of an interval) and {@code Types.NULL}
+     * send the value as its Java type, as {@link #setObject(int, Object)}
+     * does. A type that vsql doesn't have (such as {@code ARRAY} or
+     * {@code NCLOB}) is a {@code SQLFeatureNotSupportedException}, and a value
+     * that can't be converted to the type is 07006.
+     */
     @Override
     public void setObject(int index, Object x, int targetSqlType) throws SQLException {
-        set(index, x);
+        set(index, Targets.param(readStream(x, -1), targetSqlType, null));
     }
 
-    /** The value is sent as its Java type, and cast to the type it's used as. */
+    /**
+     * See {@link #setObject(int, Object, int)}. The scale or length is the
+     * scale of a {@code DECIMAL} or {@code NUMERIC} (which the value is
+     * rounded half up to), the length of a character or binary string type,
+     * and the length of a {@code Reader} or {@code InputStream}.
+     */
     @Override
     public void setObject(int index, Object x, int targetSqlType, int scaleOrLength) throws SQLException {
-        set(index, x);
+        set(index, Targets.param(readStream(x, scaleOrLength), targetSqlType, scaleOrLength));
+    }
+
+    /** A {@code JDBCType}, see {@link #setObject(int, Object, int)}. */
+    @Override
+    public void setObject(int index, Object x, SQLType targetSqlType) throws SQLException {
+        setObject(index, x, typeCode(targetSqlType));
+    }
+
+    /** A {@code JDBCType}, see {@link #setObject(int, Object, int, int)}. */
+    @Override
+    public void setObject(int index, Object x, SQLType targetSqlType, int scaleOrLength) throws SQLException {
+        setObject(index, x, typeCode(targetSqlType), scaleOrLength);
+    }
+
+    /** The java.sql.Types code of a JDBCType, other SQLTypes aren't supported. */
+    private static int typeCode(SQLType type) throws SQLException {
+        if (type == null) {
+            throw new SQLException("vsql: the target SQL type can't be null", "HY009");
+        }
+        if (!(type instanceof JDBCType t)) {
+            throw Errors.unsupported("the SQLType " + type.getVendor() + "." + type.getName());
+        }
+        return t.getVendorTypeNumber();
+    }
+
+    /** A stream or reader read now (all of it for a negative length), or the value. */
+    private static Object readStream(Object x, long length) throws SQLException {
+        return switch (x) {
+            case InputStream in -> read(in, length);
+            case Reader in -> read(in, length);
+            case null, default -> x;
+        };
     }
 }
