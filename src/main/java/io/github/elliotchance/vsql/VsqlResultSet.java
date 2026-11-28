@@ -75,6 +75,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
     // known yet.
     private boolean afterLast;
     private long rowCount = -1;
+    private final Warnings warnings = new Warnings();
 
     VsqlResultSet(VsqlStatement statement, Column[] columns, int type, long maxRows, int fetchSize,
             int fetchDirection) {
@@ -114,7 +115,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         if (open) {
             open = false;
             if (rows == null) {
-                Native.closeCursor(statement.stmt);
+                Native.closeCursor(statement.stmt, warnings);
             }
         }
     }
@@ -134,7 +135,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             if (rows != null) {
                 r = rows.hasNext() ? rows.next() : null;
             } else {
-                r = fetcher.next();
+                r = fetcher.next(warnings);
             }
         } catch (SQLException e) {
             done = true;
@@ -165,6 +166,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
                 row = ahead;
                 ahead = null;
             } else if (!done) {
+                warnings.clear();
                 row = fetch();
             }
             if (row == null) {
@@ -202,7 +204,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             afterLast = true;
             return false;
         }
-        row = fetcher.scroll(Native.SQL_FETCH_ABSOLUTE, (int) k);
+        row = fetcher.scroll(Native.SQL_FETCH_ABSOLUTE, (int) k, warnings);
         if (row == null) {
             afterLast = true;
             return false;
@@ -226,7 +228,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             for (long k = 1; high == 0; k *= 2) {
                 if (k > limit) {
                     high = limit + 1;
-                } else if (Native.scroll(statement.stmt, Native.SQL_FETCH_ABSOLUTE, (int) k)) {
+                } else if (Native.scroll(statement.stmt, Native.SQL_FETCH_ABSOLUTE, (int) k, warnings)) {
                     low = k;
                 } else {
                     high = k;
@@ -234,7 +236,7 @@ public final class VsqlResultSet extends UnsupportedResultSet {
             }
             while (high - low > 1) {
                 long mid = (low + high) / 2;
-                if (Native.scroll(statement.stmt, Native.SQL_FETCH_ABSOLUTE, (int) mid)) {
+                if (Native.scroll(statement.stmt, Native.SQL_FETCH_ABSOLUTE, (int) mid, warnings)) {
                     low = mid;
                 } else {
                     high = mid;
@@ -1157,15 +1159,24 @@ public final class VsqlResultSet extends UnsupportedResultSet {
         return fetchSize;
     }
 
+    /**
+     * The warnings of reading the current row (and of closing the cursor after
+     * the last row), which are cleared when the next row is read.
+     */
     @Override
     public SQLWarning getWarnings() throws SQLException {
-        check();
-        return null;
+        synchronized (lock) {
+            check();
+            return warnings.get();
+        }
     }
 
     @Override
     public void clearWarnings() throws SQLException {
-        check();
+        synchronized (lock) {
+            check();
+            warnings.clear();
+        }
     }
 
     @Override

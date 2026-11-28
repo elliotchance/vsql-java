@@ -989,14 +989,14 @@ public final class VsqlDatabaseMetaData extends UnsupportedDatabaseMetaData {
                     columns[i] = Native.describeCol(stmt, i + 1);
                 }
                 Native.Fetcher fetcher = new Native.Fetcher(stmt, columns);
-                for (Object[] r = fetcher.next(); r != null; r = fetcher.next()) {
+                for (Object[] r = fetcher.next(null); r != null; r = fetcher.next(null)) {
                     Column type = new Column("", (short) number(r[1]), 0, (short) 0, true);
                     rows.add(new Object[] {
                         r[0], (long) type.jdbcType(), r[2], r[3], r[4], r[5], r[6], bool(r[7]), r[8], bool(r[9]),
                         bool(r[10]), bool(r[11]), r[12], r[13], r[14], r[15], r[16], r[17],
                     });
                 }
-                Native.closeCursor(stmt);
+                Native.closeCursor(stmt, null);
             } finally {
                 Native.freeHandle(Native.SQL_HANDLE_STMT, stmt);
             }

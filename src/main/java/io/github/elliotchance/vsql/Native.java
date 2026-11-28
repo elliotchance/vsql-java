@@ -20,6 +20,8 @@ import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
+import java.util.HexFormat;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -29,7 +31,8 @@ import java.util.concurrent.locks.LockSupport;
  * Native is the only code that calls libvsql (see libvsql.h), with the Foreign
  * Function and Memory API. Each method is a thin wrapper around a libvsql
  * routine, with handles as ints, and an SQLException from the first diagnostic
- * record of the handle.
+ * record of the handle. The routines that can raise a warning (and return
+ * SQL_SUCCESS_WITH_INFO) add it to Warnings, which can be null to ignore them.
  *
  * <p>libvsql is in the jar for each OS and architecture (see
  * scripts/build-libvsql.sh), and it's copied to a file in the temporary folder
@@ -368,7 +371,10 @@ final class Native {
         return LibraryFile.extract(Path.of(System.getProperty("java.io.tmpdir")), file, library);
     }
 
-    /** Throws the error for a return code (SQL_NO_DATA isn't one). */
+    /**
+     * Throws the error for a return code (SQL_NO_DATA isn't one). A warning
+     * (SQL_SUCCESS_WITH_INFO) is ignored.
+     */
     private static void check(short rc, short handleType, int handle) throws SQLException {
         switch (rc) {
             case SQL_SUCCESS, SQL_SUCCESS_WITH_INFO, SQL_NO_DATA -> {
@@ -380,11 +386,44 @@ final class Native {
     }
 
     /**
+     * Throws the error for a return code, like check, and adds the diagnostic
+     * records of a warning (SQL_SUCCESS_WITH_INFO) to warnings (unless it's
+     * null). It must be called before any other routine is called with the
+     * handle, which would replace its diagnostics.
+     */
+    private static void check(short rc, short handleType, int handle, Warnings warnings) throws SQLException {
+        check(rc, handleType, handle);
+        if (rc == SQL_SUCCESS_WITH_INFO && warnings != null) {
+            warnings.add(warnings(handleType, handle));
+        }
+    }
+
+    /**
      * The diagnostic records of the last routine called with a handle, as an
      * SQLException for the first record, with the rest chained to it (see
      * SQLException.getNextException).
      */
     private static SQLException diagnostics(short handleType, int handle) {
+        SQLException first = records(handleType, handle, false);
+        return first == null ? Errors.sql("HY000", "unknown error") : first;
+    }
+
+    /**
+     * The diagnostic records of the last routine called with a handle that
+     * returned SQL_SUCCESS_WITH_INFO, as an SQLWarning for the first record,
+     * with the rest chained to it (see SQLWarning.getNextWarning), or null if
+     * there are none.
+     */
+    private static SQLWarning warnings(short handleType, int handle) {
+        return (SQLWarning) records(handleType, handle, true);
+    }
+
+    /**
+     * The diagnostic records of the last routine called with a handle, chained
+     * to the first one, or null if there are none. Each one is an SQLWarning
+     * if warning is true.
+     */
+    private static SQLException records(short handleType, int handle, boolean warning) {
         boolean more = false;
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment n = arena.allocate(JAVA_INT);
@@ -397,7 +436,7 @@ final class Native {
 
         SQLException first = null;
         for (short record = 1; ; record++) {
-            SQLException e = diagnostic(handleType, handle, record, more);
+            SQLException e = diagnostic(handleType, handle, record, more, warning);
             if (e == null) {
                 break;
             }
@@ -408,11 +447,15 @@ final class Native {
             }
         }
 
-        return first == null ? Errors.sql("HY000", "unknown error") : first;
+        return first;
     }
 
-    /** A diagnostic record, or null if there isn't one. */
-    private static SQLException diagnostic(short handleType, int handle, short record, boolean more) {
+    /**
+     * A diagnostic record (an SQLWarning if warning is true), or null if there
+     * isn't one.
+     */
+    private static SQLException diagnostic(short handleType, int handle, short record, boolean more,
+            boolean warning) {
         int size = 512;
         while (true) {
             try (Arena arena = Arena.ofConfined()) {
@@ -440,9 +483,13 @@ final class Native {
                 VsqlDiagnostics d = new VsqlDiagnostics(names[0], names[1], names[2], names[3], names[4],
                         names[5], names[6], names[7], more);
 
-                return Errors.sql(string(sqlstate, 5), string(message, n), d);
+                return warning
+                        ? Errors.warning(string(sqlstate, 5), string(message, n), d)
+                        : Errors.sql(string(sqlstate, 5), string(message, n), d);
             } catch (Throwable t) {
-                return Errors.sql("HY000", "can't read the error: " + t);
+                return warning
+                        ? new SQLWarning("vsql: can't read the warning: " + t, "01000")
+                        : Errors.sql("HY000", "can't read the error: " + t);
             }
         }
     }
@@ -524,14 +571,14 @@ final class Native {
         }
     }
 
-    static void connect(int dbc, String name) throws SQLException {
+    static void connect(int dbc, String name, Warnings warnings) throws SQLException {
         int length = utf8Length(name);
         if (length > Short.MAX_VALUE) {
             throw Errors.sql("HY090", "the database name is too long");
         }
         try (Arena arena = Arena.ofConfined()) {
             check((short) CONNECT.invokeExact(dbc, utf8(arena, name), (short) length,
-                    MemorySegment.NULL, (short) 0, MemorySegment.NULL, (short) 0), SQL_HANDLE_DBC, dbc);
+                    MemorySegment.NULL, (short) 0, MemorySegment.NULL, (short) 0), SQL_HANDLE_DBC, dbc, warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -549,12 +596,13 @@ final class Native {
         }
     }
 
-    static void setAutocommit(int dbc, boolean on) throws SQLException {
+    static void setAutocommit(int dbc, boolean on, Warnings warnings) throws SQLException {
         // invokeExact needs the exact types of its arguments, which a
         // conditional expression doesn't have, so it's a variable.
         MemorySegment value = on ? AUTOCOMMIT_ON : AUTOCOMMIT_OFF;
         try {
-            check((short) SET_CONNECT_ATTR.invokeExact(dbc, SQL_ATTR_AUTOCOMMIT, value, 0), SQL_HANDLE_DBC, dbc);
+            check((short) SET_CONNECT_ATTR.invokeExact(dbc, SQL_ATTR_AUTOCOMMIT, value, 0), SQL_HANDLE_DBC, dbc,
+                    warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -562,10 +610,10 @@ final class Native {
         }
     }
 
-    static void startTran(int dbc, int accessMode, int isolationLevel) throws SQLException {
+    static void startTran(int dbc, int accessMode, int isolationLevel, Warnings warnings) throws SQLException {
         try {
             check((short) START_TRAN.invokeExact(SQL_HANDLE_DBC, dbc, accessMode, isolationLevel),
-                    SQL_HANDLE_DBC, dbc);
+                    SQL_HANDLE_DBC, dbc, warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -594,10 +642,10 @@ final class Native {
         }
     }
 
-    static void endTran(int dbc, boolean commit) throws SQLException {
+    static void endTran(int dbc, boolean commit, Warnings warnings) throws SQLException {
         short completion = commit ? SQL_COMMIT : SQL_ROLLBACK;
         try {
-            check((short) END_TRAN.invokeExact(SQL_HANDLE_DBC, dbc, completion), SQL_HANDLE_DBC, dbc);
+            check((short) END_TRAN.invokeExact(SQL_HANDLE_DBC, dbc, completion), SQL_HANDLE_DBC, dbc, warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -610,11 +658,11 @@ final class Native {
      * (SQL_SAVEPOINT_NAME_RELEASE) a savepoint, which is named by
      * SQL_ATTR_SAVEPOINT_NAME.
      */
-    static void endSavepoint(int dbc, String name, short completion) throws SQLException {
+    static void endSavepoint(int dbc, String name, short completion, Warnings warnings) throws SQLException {
         try (Arena arena = Arena.ofConfined()) {
             check((short) SET_CONNECT_ATTR.invokeExact(dbc, SQL_ATTR_SAVEPOINT_NAME, utf8(arena, name),
                     utf8Length(name)), SQL_HANDLE_DBC, dbc);
-            check((short) END_TRAN.invokeExact(SQL_HANDLE_DBC, dbc, completion), SQL_HANDLE_DBC, dbc);
+            check((short) END_TRAN.invokeExact(SQL_HANDLE_DBC, dbc, completion), SQL_HANDLE_DBC, dbc, warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -797,10 +845,10 @@ final class Native {
         }
     }
 
-    static void execDirect(int stmt, String sql) throws SQLException {
+    static void execDirect(int stmt, String sql, Warnings warnings) throws SQLException {
         try (Arena arena = Arena.ofConfined()) {
             check((short) EXEC_DIRECT.invokeExact(stmt, utf8(arena, sql), utf8Length(sql)),
-                    SQL_HANDLE_STMT, stmt);
+                    SQL_HANDLE_STMT, stmt, warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -808,9 +856,10 @@ final class Native {
         }
     }
 
-    static void prepare(int stmt, String sql) throws SQLException {
+    static void prepare(int stmt, String sql, Warnings warnings) throws SQLException {
         try (Arena arena = Arena.ofConfined()) {
-            check((short) PREPARE.invokeExact(stmt, utf8(arena, sql), utf8Length(sql)), SQL_HANDLE_STMT, stmt);
+            check((short) PREPARE.invokeExact(stmt, utf8(arena, sql), utf8Length(sql)), SQL_HANDLE_STMT, stmt,
+                    warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -823,7 +872,7 @@ final class Native {
      * this execution only: their memory is freed when SQLExecute returns, so
      * they're unbound so that libvsql never reads them again.
      */
-    static void execute(int stmt, Param[] params) throws SQLException {
+    static void execute(int stmt, Param[] params, Warnings warnings) throws SQLException {
         try (Arena arena = Arena.ofConfined()) {
             try {
                 MemorySegment inds = arena.allocate(JAVA_INT, Math.max(params.length, 1));
@@ -867,7 +916,7 @@ final class Native {
                             p.valueType(), p.parameterType(), p.columnSize(), p.decimalDigits(), value,
                             bufferLength, ind), SQL_HANDLE_STMT, stmt);
                 }
-                check((short) EXECUTE.invokeExact(stmt), SQL_HANDLE_STMT, stmt);
+                check((short) EXECUTE.invokeExact(stmt), SQL_HANDLE_STMT, stmt, warnings);
             } finally {
                 if (params.length > 0) {
                     short rc = (short) FREE_STMT.invokeExact(stmt, SQL_RESET_PARAMS);
@@ -935,9 +984,9 @@ final class Native {
         }
     }
 
-    static void closeCursor(int stmt) throws SQLException {
+    static void closeCursor(int stmt, Warnings warnings) throws SQLException {
         try {
-            check((short) CLOSE_CURSOR.invokeExact(stmt), SQL_HANDLE_STMT, stmt);
+            check((short) CLOSE_CURSOR.invokeExact(stmt), SQL_HANDLE_STMT, stmt, warnings);
         } catch (SQLException e) {
             throw e;
         } catch (Throwable t) {
@@ -964,13 +1013,13 @@ final class Native {
      * Moves a scrollable cursor (see SQLFetchScroll) without reading the row.
      * It's false if there's no row there.
      */
-    static boolean scroll(int stmt, short orientation, int offset) throws SQLException {
+    static boolean scroll(int stmt, short orientation, int offset, Warnings warnings) throws SQLException {
         try {
             short rc = (short) FETCH_SCROLL.invokeExact(stmt, orientation, offset);
             if (rc == SQL_NO_DATA) {
                 return false;
             }
-            check(rc, SQL_HANDLE_STMT, stmt);
+            check(rc, SQL_HANDLE_STMT, stmt, warnings);
             return true;
         } catch (SQLException e) {
             throw e;
@@ -1031,9 +1080,11 @@ final class Native {
         /**
          * Fetches the next row, it's null after the last row. Each column is
          * read as its kind (see Column.kind): a Long, Double, Float, String or
-         * byte[], or null for a NULL.
+         * byte[], or null for a NULL. The warnings of SQLFetch and
+         * SQLGetData are added to warnings (which can be null), other than the
+         * 01004 of reading a long value in pieces.
          */
-        Object[] next() throws SQLException {
+        Object[] next(Warnings warnings) throws SQLException {
             short rc;
             try {
                 rc = (short) FETCH.invokeExact(stmt);
@@ -1043,20 +1094,20 @@ final class Native {
             if (rc == SQL_NO_DATA) {
                 return null;
             }
-            check(rc, SQL_HANDLE_STMT, stmt);
-            return read();
+            check(rc, SQL_HANDLE_STMT, stmt, warnings);
+            return read(warnings);
         }
 
         /**
          * Moves a scrollable cursor (see SQLFetchScroll) and fetches the row,
          * it's null if there's no row there (see next).
          */
-        Object[] scroll(short orientation, int offset) throws SQLException {
-            return Native.scroll(stmt, orientation, offset) ? read() : null;
+        Object[] scroll(short orientation, int offset, Warnings warnings) throws SQLException {
+            return Native.scroll(stmt, orientation, offset, warnings) ? read(warnings) : null;
         }
 
         /** The row the cursor is on (see next). */
-        private Object[] read() throws SQLException {
+        private Object[] read(Warnings warnings) throws SQLException {
             try {
                 Object[] row = new Object[columns.length];
                 for (int i = 0; i < columns.length; i++) {
@@ -1064,21 +1115,21 @@ final class Native {
                     switch (columns[i].kind()) {
                         case INTEGER -> {
                             check((short) GET_DATA.invokeExact(stmt, n, SQL_BIGINT, number, 8, ind),
-                                    SQL_HANDLE_STMT, stmt);
+                                    SQL_HANDLE_STMT, stmt, warnings);
                             row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_LONG, 0);
                         }
                         case DOUBLE -> {
                             check((short) GET_DATA.invokeExact(stmt, n, SQL_DOUBLE, number, 8, ind),
-                                    SQL_HANDLE_STMT, stmt);
+                                    SQL_HANDLE_STMT, stmt, warnings);
                             row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_DOUBLE, 0);
                         }
                         case REAL -> {
                             check((short) GET_DATA.invokeExact(stmt, n, SQL_REAL, number, 4, ind),
-                                    SQL_HANDLE_STMT, stmt);
+                                    SQL_HANDLE_STMT, stmt, warnings);
                             row[i] = ind.get(JAVA_INT, 0) == SQL_NULL_DATA ? null : number.get(JAVA_FLOAT, 0);
                         }
-                        case TEXT -> row[i] = getString(n);
-                        case BINARY -> row[i] = getBytes(n);
+                        case TEXT -> row[i] = getString(n, warnings);
+                        case BINARY -> row[i] = getBytes(n, warnings);
                     }
                 }
 
@@ -1093,9 +1144,11 @@ final class Native {
         /**
          * Reads a column as SQL_CHAR, it's null for a NULL. A string that
          * doesn't fit in the buffer is read in pieces, the rest into a buffer
-         * that's at least the size of the rest of it.
+         * that's at least the size of the rest of it. The 01004 (string data,
+         * right truncation) of each piece isn't a warning for the
+         * application, but any other warning is added to warnings.
          */
-        private String getString(short n) throws Throwable {
+        private String getString(short n, Warnings warnings) throws Throwable {
             MemorySegment b = buf;
             int size = (int) b.byteSize();
             java.io.ByteArrayOutputStream s = null;
@@ -1104,6 +1157,7 @@ final class Native {
                 check(rc, SQL_HANDLE_STMT, stmt);
                 int length = ind.get(JAVA_INT, 0);
                 if (length == SQL_NULL_DATA) {
+                    check(rc, SQL_HANDLE_STMT, stmt, warnings);
                     return null;
                 }
 
@@ -1124,6 +1178,7 @@ final class Native {
                     continue;
                 }
 
+                check(rc, SQL_HANDLE_STMT, stmt, warnings);
                 byte[] last = b.asSlice(0, length).toArray(JAVA_BYTE);
                 if (s == null) {
                     return new String(last, StandardCharsets.UTF_8);
@@ -1136,9 +1191,10 @@ final class Native {
         /**
          * Reads a column as SQL_BINARY, it's null for a NULL. A value that
          * doesn't fit in the buffer is read in pieces (like getString, but
-         * there's no null terminator).
+         * there's no null terminator), and its warnings are added to warnings
+         * the same way.
          */
-        private byte[] getBytes(short n) throws Throwable {
+        private byte[] getBytes(short n, Warnings warnings) throws Throwable {
             MemorySegment b = buf;
             int size = (int) b.byteSize();
             java.io.ByteArrayOutputStream out = null;
@@ -1147,6 +1203,7 @@ final class Native {
                 check(rc, SQL_HANDLE_STMT, stmt);
                 int length = ind.get(JAVA_INT, 0);
                 if (length == SQL_NULL_DATA) {
+                    check(rc, SQL_HANDLE_STMT, stmt, warnings);
                     return null;
                 }
 
@@ -1162,6 +1219,7 @@ final class Native {
                     continue;
                 }
 
+                check(rc, SQL_HANDLE_STMT, stmt, warnings);
                 byte[] last = b.asSlice(0, Math.min(length, size)).toArray(JAVA_BYTE);
                 if (out == null) {
                     return last;

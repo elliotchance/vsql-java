@@ -34,6 +34,11 @@ public class VsqlStatement extends UnsupportedStatement {
     private boolean poolable;
     private boolean closeOnCompletion;
     private final List<String> batch = new ArrayList<>();
+    // The warnings of the last execution (or of the whole batch).
+    final Warnings warnings = new Warnings();
+    // True while a batch is executed, so that each statement doesn't clear the
+    // warnings of the ones before it.
+    boolean inBatch;
 
     VsqlStatement(VsqlConnection connection) {
         this(connection, ResultSet.TYPE_FORWARD_ONLY);
@@ -112,11 +117,17 @@ public class VsqlStatement extends UnsupportedStatement {
         }
     }
 
-    /** Prepares to execute: closes the result set and starts a transaction. */
+    /**
+     * Prepares to execute: closes the result set, clears the warnings (unless
+     * it's in a batch) and starts a transaction.
+     */
     void beforeExecute() throws SQLException {
         check();
         discardResultSet();
         updateCount = -1;
+        if (!inBatch) {
+            warnings.clear();
+        }
         connection.begin();
     }
 
@@ -141,7 +152,7 @@ public class VsqlStatement extends UnsupportedStatement {
         synchronized (connection) {
             beforeExecute();
             try {
-                Native.execDirect(handle(), sql);
+                Native.execDirect(handle(), sql, warnings);
             } finally {
                 connection.statementEnded();
             }
@@ -255,13 +266,19 @@ public class VsqlStatement extends UnsupportedStatement {
             check();
             List<String> statements = new ArrayList<>(batch);
             batch.clear();
+            warnings.clear();
             long[] counts = new long[statements.size()];
-            for (int i = 0; i < statements.size(); i++) {
-                try {
-                    counts[i] = executeLargeUpdate(statements.get(i));
-                } catch (SQLException e) {
-                    throw batchError(e, counts, i);
+            inBatch = true;
+            try {
+                for (int i = 0; i < statements.size(); i++) {
+                    try {
+                        counts[i] = executeLargeUpdate(statements.get(i));
+                    } catch (SQLException e) {
+                        throw batchError(e, counts, i);
+                    }
                 }
+            } finally {
+                inBatch = false;
             }
             return toInts(counts);
         }
@@ -490,15 +507,26 @@ public class VsqlStatement extends UnsupportedStatement {
         return poolable;
     }
 
+    /**
+     * The warnings of the last execution (all of the statements of a batch),
+     * such as 01003 (null value eliminated in set function). They're cleared
+     * when the statement is executed again. The warnings of reading the rows
+     * are the result set's.
+     */
     @Override
     public SQLWarning getWarnings() throws SQLException {
-        check();
-        return null;
+        synchronized (connection) {
+            check();
+            return warnings.get();
+        }
     }
 
     @Override
     public void clearWarnings() throws SQLException {
-        check();
+        synchronized (connection) {
+            check();
+            warnings.clear();
+        }
     }
 
     @Override

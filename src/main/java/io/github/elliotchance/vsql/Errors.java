@@ -8,11 +8,13 @@ import java.sql.SQLInvalidAuthorizationSpecException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLSyntaxErrorException;
 import java.sql.SQLTransactionRollbackException;
+import java.sql.SQLWarning;
 
 /**
  * Errors makes the SQLException for an SQLSTATE: the JDBC subclass for its
  * class (the first two characters), with the SQLSTATE as getSQLState. An error
- * from libvsql also implements VsqlException, with its diagnostics.
+ * (or a warning) from libvsql also implements VsqlException, with its
+ * diagnostics.
  */
 final class Errors {
     private Errors() {
@@ -63,6 +65,11 @@ final class Errors {
         };
     }
 
+    /** A warning from libvsql (a completion condition), with its diagnostics. */
+    static SQLWarning warning(String sqlstate, String message, VsqlDiagnostics d) {
+        return new Warning(message, sqlstate, d);
+    }
+
     static SQLFeatureNotSupportedException unsupported(String what) {
         return new SQLFeatureNotSupportedException("vsql: " + what + " is not supported", "0A000");
     }
@@ -76,6 +83,21 @@ final class Errors {
     }
 
     // The JDBC subclasses that implement VsqlException.
+
+    private static final class Warning extends SQLWarning implements VsqlException {
+        private static final long serialVersionUID = 1L;
+        private final VsqlDiagnostics diagnostics;
+
+        Warning(String message, String sqlstate, VsqlDiagnostics diagnostics) {
+            super(message, sqlstate);
+            this.diagnostics = diagnostics;
+        }
+
+        @Override
+        public VsqlDiagnostics getDiagnostics() {
+            return diagnostics;
+        }
+    }
 
     private static final class Other extends SQLException implements VsqlException {
         private static final long serialVersionUID = 1L;
